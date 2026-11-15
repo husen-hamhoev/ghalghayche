@@ -29,6 +29,7 @@ export class Renderer {
     this.ubo = new Float32Array(UBO_SIZE / 4);
     this.stats = { draws: 0, instances: 0 };
     this.frame = 0;
+    this.animalLevel = 1; // 0 few, 1 normal, 2 many, 3 lots
     this.histIndex = 0;
     this.resetHistory = true;
     this.prevViewProj = null;
@@ -645,22 +646,23 @@ export class Renderer {
       pass.setPipeline(this.pipes.sheep);
       this.#bindMesh(pass, this.meshes.sheep);
       pass.setVertexBuffer(1, this.sets.sheep.buf);
-      pass.drawIndexed(this.meshes.sheep.count, this.sets.sheep.set.count);
+      pass.drawIndexed(this.meshes.sheep.count, this.#animals('sheep'));
       for (const [mesh, key] of [['horse', 'horses'], ['dog', 'dogs'], ['tur', 'tur']]) {
-        if (!this.sets[key].set.count) continue;
+        const n = this.#animals(key);
+        if (!n) continue;
         this.#bindMesh(pass, this.meshes[mesh]);
         pass.setVertexBuffer(1, this.sets[key].buf);
-        pass.drawIndexed(this.meshes[mesh].count, this.sets[key].set.count);
+        pass.drawIndexed(this.meshes[mesh].count, n);
       }
       pass.setPipeline(this.pipes.wolves);
       this.#bindMesh(pass, this.meshes.wolf);
       pass.setVertexBuffer(1, this.sets.wolves.buf);
-      pass.drawIndexed(this.meshes.wolf.count, this.sets.wolves.set.count);
+      pass.drawIndexed(this.meshes.wolf.count, this.#animals('wolves'));
 
       pass.setPipeline(this.pipes.bats);
       this.#bindMesh(pass, this.meshes.eagle);
       pass.setVertexBuffer(1, this.sets.bats.buf);
-      pass.drawIndexed(this.meshes.eagle.count, this.sets.bats.set.count);
+      pass.drawIndexed(this.meshes.eagle.count, this.#animals('bats'));
 
       // butterflies over the meadows by day
       if (!OFF.has('bugs')) { pass.setPipeline(this.butterflyPipe); pass.draw(12, q.butterflies); }
@@ -668,7 +670,7 @@ export class Renderer {
       pass.setPipeline(this.pipes.birds);
       this.#bindMesh(pass, this.meshes.eagle);
       pass.setVertexBuffer(1, this.sets.birds.buf);
-      pass.drawIndexed(this.meshes.eagle.count, this.sets.birds.set.count);
+      pass.drawIndexed(this.meshes.eagle.count, this.#animals('birds'));
 
       // water
       pass.setPipeline(this.pipes.water);
@@ -740,6 +742,12 @@ export class Renderer {
       pass.end();
     }
     d.queue.submit([enc.finish()]);
+  }
+
+  // how many of an animal list to draw at the current Animals level
+  #animals(key) {
+    const s = this.sets[key].set;
+    return s.tierCounts ? s.tierCounts[this.animalLevel] : s.count;
   }
 
   #bindMesh(pass, m) {

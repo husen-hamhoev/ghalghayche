@@ -300,7 +300,16 @@ async function main() {
     buildChoice($('time'), TIMES.map((x) => ({ id: x.id, label: t('time.' + x.id) })), settings.time, applyTime);
     buildChoice($('season'), SEASONS.map((x) => ({ id: x.id, label: t('season.' + x.id) })), settings.season, (id) => { settings.season = id; saveSettings(settings); renderer.resetHistory = true; });
     buildChoice($('weather'), WEATHERS.map((x) => ({ id: x.id, label: t('weather.' + x.id) })), settings.weather, (id) => { settings.weather = id; saveSettings(settings); wx.phase = 'clear'; wx.t = 0; });
+    buildChoice($('animals'), ANIMALS.map((id) => ({ id, label: t('animals.' + id) })), settings.animals, (id) => {
+      settings.animals = id; saveSettings(settings);
+      renderer.animalLevel = ANIMALS.indexOf(id);
+    });
   };
+  // how many animals: few, normal, many, lots
+  const ANIMALS = ['few', 'normal', 'many', 'lots'];
+  if (params.get('animals')) settings.animals = params.get('animals');
+  if (!ANIMALS.includes(settings.animals)) settings.animals = 'normal';
+  renderer.animalLevel = ANIMALS.indexOf(settings.animals);
   buildChoices();
 
   // Weather state. "Changing" cycles: clear, clouds gather on the peaks, rain
@@ -566,7 +575,7 @@ async function main() {
       cam.pos[0] > TRIB.xj ? Math.hypot(distTrib(cam.pos[0], cam.pos[2]), cam.pos[1] - TRIB.bed(cam.pos[0])) : 1e9,
     );
     let flockD = 1e9;
-    for (const f of plan.flocks || []) flockD = Math.min(flockD, v3.len(v3.sub(cam.pos, [f.x, f.h, f.z])));
+    for (const f of plan.flocks || []) if (f.tier <= renderer.animalLevel) flockD = Math.min(flockD, v3.len(v3.sub(cam.pos, [f.x, f.h, f.z])));
     const fi = clamp(Math.round((cam.pos[0] - MIN) / CELL), 0, N - 1), fj = clamp(Math.round((cam.pos[2] - MIN) / CELL), 0, N - 1);
     audio.update(dt, {
       aboveGround: cam.pos[1] - ground, altitude: cam.pos[1], riverDist: rd,

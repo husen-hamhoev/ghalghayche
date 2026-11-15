@@ -449,6 +449,15 @@ export function buildStructures(t, plan, surf, seed = 11) {
 
 export class InstanceSet {
   constructor(list, cull = true) {
+    if (!cull) {
+      // drawn whole, in the given order (so a prefix of the list can be drawn)
+      this.data = new Float32Array(list.length * 8);
+      list.forEach((it, i) => this.data.set(it, i * 8));
+      this.cells = list.length ? [{ start: 0, count: list.length, x0: MIN, z0: MIN, y0: -1e5, y1: 1e5 }] : [];
+      this.count = list.length;
+      this.cull = false;
+      return;
+    }
     const cells = Array.from({ length: CELLS * CELLS }, () => []);
     for (const it of list) {
       const cx = clamp(Math.floor((it[0] - MIN) / CELL_SIZE), 0, CELLS - 1);
@@ -481,7 +490,7 @@ export function scatter(t, plan, density = 1, seed = 23) {
     return [t.splat[k] / 255, t.splat[k + 1] / 255, t.splat[k + 2] / 255, t.splat[k + 3] / 255];
   };
 
-  const pines = [], broad = [], rocks = [], sheep = [];
+  const pines = [], broad = [], rocks = [];
   const treeTarget = Math.floor(160000 * K * K * density);
   for (let i = 0; i < treeTarget * 6 && pines.length + broad.length < treeTarget; i++) {
     const x = MIN + 40 + rng() * (SIZE - 80), z = MIN + 40 + rng() * (SIZE - 80);
@@ -523,13 +532,7 @@ export function scatter(t, plan, density = 1, seed = 23) {
     rocks.push([x, Math.min(y - sc * 0.25, low + sc * 0.1), z, tilt, sc, sc * (0.6 + rng() * 0.5), rng(), 1]);
   }
 
-  // grazing animals: [x, y, z, rot, scale xz, scale y, seed, how far it wanders]
-  const animal = (list, kind, x, z, wander, size = 1) => {
-    const [sx, sy] = ANIMAL_SCALE[kind];
-    const k = size * (0.9 + rng() * 0.2);
-    list.push([x, t.sample(x, z), z, 0, sx * k, sy * k, rng(), wander]);
-  };
-  const horses = [], dogs = [], tur = [], wolves = [], rhodo = [], bats = [];
+  const rhodo = [];
 
   // rhododendron patches on the high, cool slopes
   for (let c = 0, tries = 0; c < 70 && tries < 5000; tries++) {
@@ -546,78 +549,123 @@ export function scatter(t, plan, density = 1, seed = 23) {
     c++;
   }
 
-  // flocks grazing the meadows near villages and at the sheepfold, each with a dog
+  // ---- animals, in tiers --------------------------------------------------------------
+  // Every animal gets the lowest "Animals" level it appears at: 0 few, 1 normal,
+  // 2 many, 3 lots. All are created now; the setting only changes how many of
+  // each list are drawn (lists are sorted by tier).
+  const T = { sheep: [], dogs: [], horses: [], tur: [], wolves: [], birds: [], bats: [] };
+  const put = (kind, item, tier) => T[kind].push([tier, item]);
+  const half = (i) => (i % 2 === 0 ? 0 : 1); // the base animals: every other one is "few"
+  // grazing animals: [x, y, z, rot, scale xz, scale y, seed, how far it wanders]
+  const animalT = (kind, list, x, z, wander, tier, size = 1) => {
+    const [sx, sy] = ANIMAL_SCALE[kind];
+    const k = size * (0.9 + rng() * 0.2);
+    put(list, [x, t.sample(x, z), z, 0, sx * k, sy * k, rng(), wander], tier);
+  };
+  // an open meadow, away from villages, forests and rivers
+  const meadow = (lo, hi) => {
+    for (let i = 0; i < 400; i++) {
+      const x = MIN + 200 + rng() * (SIZE - 400), z = MIN + 200 + rng() * (SIZE - 400);
+      const y = t.sample(x, z);
+      if (y < lo || y > hi || t.normal(x, z)[1] < 0.9 || splat(x, z)[2] > 0.3) continue;
+      if (nearVillage(x, z, 1.4) || near(x, z, 15) || Math.min(distMain(x, z), distTrib(x, z)) < 40) continue;
+      return { x, z, h: y };
+    }
+    return null;
+  };
+
+  // flocks of sheep, each with a dog: by the villages and the sheepfold, then
+  // more on open meadows at the higher levels
   const flocks = [];
-  const foldSpot = { x: plan.fold.x + 40, z: plan.fold.z - 30, h: t.sample(plan.fold.x + 40, plan.fold.z - 30) };
-  for (const v of [plan.erzi, plan.erzi, plan.egikal, plan.targim, null]) {
-    const c = v ? findSpot(t, rng, v.x, v.z, v.fieldR * 1.8, { flatR: 25, wRough: 1, minRiver: S(50), tries: 300 }) : foldSpot;
-    if (!c) continue;
-    animal(dogs, 'dog', c.x + 8, c.z - 6, 2.2);
+  const flock = (c, tier, base) => {
+    animalT('dog', 'dogs', c.x + 8, c.z - 6, 2.2, base ? 0 : tier);
     const n = 26 + Math.floor(rng() * 14);
     for (let i = 0; i < n; i++) {
       const a = rng() * 6.283, r = Math.sqrt(rng()) * 22;
       const x = c.x + Math.cos(a) * r, z = c.z + Math.sin(a) * r;
       if (near(x, z, 4)) continue;
-      sheep.push([x, t.sample(x, z), z, rng() * 6.283, 0.9 + rng() * 0.2, 0.9 + rng() * 0.2, rng(), 1]);
+      put('sheep', [x, t.sample(x, z), z, rng() * 6.283, 0.9 + rng() * 0.2, 0.9 + rng() * 0.2, rng(), 1], base ? half(i) : tier);
     }
-    flocks.push(c);
+    flocks.push({ ...c, tier: base ? 0 : tier });
+  };
+  const foldSpot = { x: plan.fold.x + 40, z: plan.fold.z - 30, h: t.sample(plan.fold.x + 40, plan.fold.z - 30) };
+  for (const v of [plan.erzi, plan.erzi, plan.egikal, plan.targim, null]) {
+    const c = v ? findSpot(t, rng, v.x, v.z, v.fieldR * 1.8, { flatR: 25, wRough: 1, minRiver: S(50), tries: 300 }) : foldSpot;
+    if (c) flock(c, 1, true);
   }
+  for (let k = 0; k < 13; k++) { const c = meadow(1080, 1000 + V(1200)); if (c) flock(c, k < 5 ? 2 : 3, false); }
   plan.flocks = flocks;
 
-  // horses near Erzi and Targim
+  // horses near Erzi and Targim, then more herds
   for (const v of [plan.erzi, plan.targim]) {
     const c = findSpot(t, rng, v.x + 120, v.z - 80, v.fieldR * 2, { flatR: 25, wRough: 1, minRiver: S(50), tries: 300 });
-    for (let i = 0; i < 6; i++) animal(horses, 'horse', c.x + (rng() - 0.5) * 40, c.z + (rng() - 0.5) * 40, 1.4);
+    for (let i = 0; i < 6; i++) animalT('horse', 'horses', c.x + (rng() - 0.5) * 40, c.z + (rng() - 0.5) * 40, 1.4, half(i));
+  }
+  for (let k = 0; k < 5; k++) {
+    const c = meadow(1080, 1000 + V(1000));
+    if (c) for (let i = 0; i < 5 + Math.floor(rng() * 4); i++) animalT('horse', 'horses', c.x + (rng() - 0.5) * 40, c.z + (rng() - 0.5) * 40, 1.4, k < 2 ? 2 : 3);
   }
 
   // tur on the cliffs and ledges, high above the gorge
-  for (let g = 0, tries = 0; g < 5 && tries < 4000; tries++) {
+  for (let g = 0, tries = 0; g < 18 && tries < 9000; tries++) {
     const x = MIN + 200 + rng() * (SIZE - 400), z = MIN + 200 + rng() * (SIZE - 400);
     const n = t.normal(x, z), y = t.sample(x, z);
     if (n[1] < 0.5 || n[1] > 0.78 || y < 1000 + V(650) || nearVillage(x, z, 3)) continue;
-    for (let i = 0; i < 4; i++) animal(tur, 'tur', x + (rng() - 0.5) * 18, z + (rng() - 0.5) * 18, 0.25);
+    const tier = g < 5 ? half(g) : g < 10 ? 2 : 3;
+    for (let i = 0; i < 4; i++) animalT('tur', 'tur', x + (rng() - 0.5) * 18, z + (rng() - 0.5) * 18, 0.25, tier);
     g++;
   }
 
-  // a wolf pack trotting a wide loop over the high meadows by the sheepfold
-  {
-    const cx = plan.fold.x - 230, cz = plan.fold.z + 60, R = 150;
+  // wolf packs trotting wide loops over the high meadows: one by the
+  // sheepfold always, more at the higher levels
+  const pack = (cx, cz, R, n, tier) => {
     const [sx, sy] = ANIMAL_SCALE.wolf;
-    for (let i = 0; i < 5; i++) wolves.push([cx, 0, cz, i, sx * (0.95 + rng() * 0.12), sy * (0.95 + rng() * 0.12), rng(), R]);
-    plan.wolves = { x: cx, z: cz, R };
-  }
-
-  // eagles: pairs over each tower village, and more soaring along the gorge
-  const birds = [];
-  const bird = (x, z, above, radius) => {
-    const ground = Math.max(t.sample(x, z), RIVER.bed(z));
-    birds.push([x, ground + above, z, rng() * 6.283, radius, 0.12 + rng() * 0.1, rng(), 0]);
+    for (let i = 0; i < n; i++) put('wolves', [cx, 0, cz, i, sx * (0.95 + rng() * 0.12), sy * (0.95 + rng() * 0.12), rng(), R], tier);
   };
-  for (const v of [plan.erzi, plan.egikal, plan.targim, plan.vov]) {
-    for (let i = 0; i < 2; i++) bird(v.x + (rng() - 0.5) * 80, v.z + (rng() - 0.5) * 80, 45 + rng() * 70, 35 + rng() * 45);
-  }
-  for (let i = 0; i < 10; i++) {
-    const z = MIN + 300 + rng() * (SIZE - 600);
-    bird(RIVER.x(z) + (rng() - 0.5) * 600, z, 70 + rng() * 200, 50 + rng() * 90);
-  }
-  // bats around the villages, the sheepfold and the river after dusk
-  for (const [x, z] of [[plan.erzi.x, plan.erzi.z], [plan.erzi.x - 60, plan.erzi.z + 40], [plan.fold.x, plan.fold.z], [plan.targim.x, plan.targim.z], [RIVER.x(plan.erzi.z), plan.erzi.z]]) {
-    for (let i = 0; i < 3; i++) bats.push([x + (rng() - 0.5) * 30, t.sample(x, z) + 14 + rng() * 10, z + (rng() - 0.5) * 30, rng() * 100, 0, 0, 0, 0]);
+  pack(plan.fold.x - 230, plan.fold.z + 60, 150, 5, 0);
+  plan.wolves = { x: plan.fold.x - 230, z: plan.fold.z + 60, R: 150 };
+  for (let k = 0; k < 4; k++) {
+    const c = meadow(1000 + V(450), 1000 + V(1300));
+    if (c) pack(c.x, c.z, 100 + rng() * 80, 4 + Math.floor(rng() * 3), k < 1 ? 1 : k < 2 ? 2 : 3);
   }
 
-  // bearded vultures soaring wide and high along the cliffs (size in the last slot)
-  for (let i = 0; i < 4; i++) {
-    const z = MIN + 500 + rng() * (SIZE - 1000);
-    bird(RIVER.x(z) + (rng() - 0.5) * 800, z, 220 + rng() * 200, 140 + rng() * 120);
-    birds[birds.length - 1][7] = 2.9;
+  // eagles over the villages and along the gorge; bearded vultures higher up
+  const bird = (x, z, above, radius, tier, size = 0) => {
+    const ground = Math.max(t.sample(x, z), RIVER.bed(z));
+    put('birds', [x, ground + above, z, rng() * 6.283, radius, 0.12 + rng() * 0.1, rng(), size], tier);
+  };
+  let bi = 0;
+  for (const v of [plan.erzi, plan.egikal, plan.targim, plan.vov]) {
+    for (let i = 0; i < 2; i++) bird(v.x + (rng() - 0.5) * 80, v.z + (rng() - 0.5) * 80, 45 + rng() * 70, 35 + rng() * 45, half(bi++));
   }
+  for (let i = 0; i < 34; i++) {
+    const z = MIN + 300 + rng() * (SIZE - 600);
+    bird(RIVER.x(z) + (rng() - 0.5) * 900, z, 70 + rng() * 220, 50 + rng() * 90, i < 10 ? half(i) : i < 20 ? 2 : 3);
+  }
+  for (let i = 0; i < 11; i++) {
+    const z = MIN + 500 + rng() * (SIZE - 1000);
+    bird(RIVER.x(z) + (rng() - 0.5) * 900, z, 220 + rng() * 200, 140 + rng() * 120, i < 4 ? 1 : i < 7 ? 2 : 3, 2.9);
+  }
+
+  // bats around the villages, the sheepfold, the mills and the river after dusk
+  const batSpots = [[plan.erzi.x, plan.erzi.z], [plan.erzi.x - 60, plan.erzi.z + 40], [plan.fold.x, plan.fold.z], [plan.targim.x, plan.targim.z], [RIVER.x(plan.erzi.z), plan.erzi.z]];
+  const moreBats = [...plan.mills.map((m) => [m.x, m.z]), [plan.bridge.x, plan.bridge.z], [plan.egikal.x, plan.egikal.z]];
+  batSpots.forEach(([x, z], k) => { for (let i = 0; i < 3; i++) put('bats', [x + (rng() - 0.5) * 30, t.sample(x, z) + 14 + rng() * 10, z + (rng() - 0.5) * 30, rng() * 100, 0, 0, 0, 0], half(k * 3 + i)); });
+  moreBats.forEach(([x, z], k) => { for (let i = 0; i < 4; i++) put('bats', [x + (rng() - 0.5) * 30, t.sample(x, z) + 12 + rng() * 10, z + (rng() - 0.5) * 30, rng() * 100, 0, 0, 0, 0], k < 3 ? 2 : 3); });
+
+  const tiered = (kind) => {
+    const items = T[kind].sort((a, b) => a[0] - b[0]);
+    const set = new InstanceSet(items.map((x) => x[1]), false);
+    set.tierCounts = [0, 1, 2, 3].map((k) => items.filter((x) => x[0] <= k).length);
+    return set;
+  };
 
   return {
     pines: new InstanceSet(pines), broad: new InstanceSet(broad), rocks: new InstanceSet(rocks),
-    sheep: new InstanceSet(sheep, false), birds: new InstanceSet(birds, false),
-    horses: new InstanceSet(horses, false), dogs: new InstanceSet(dogs, false),
-    tur: new InstanceSet(tur, false), wolves: new InstanceSet(wolves, false),
-    rhodo: new InstanceSet(rhodo), bats: new InstanceSet(bats, false),
+    sheep: tiered('sheep'), birds: tiered('birds'),
+    horses: tiered('horses'), dogs: tiered('dogs'),
+    tur: tiered('tur'), wolves: tiered('wolves'),
+    rhodo: new InstanceSet(rhodo), bats: tiered('bats'),
   };
 }
 
