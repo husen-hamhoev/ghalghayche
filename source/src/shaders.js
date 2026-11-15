@@ -111,7 +111,7 @@ fn skyColor(d: vec3f, sunDisk: bool) -> vec3f {
 }
 
 // Height fog with an analytic integral, plus a thin valley mist layer.
-fn applyFog(col: vec3f, wp: vec3f) -> vec3f {
+fn fogAmount(wp: vec3f) -> f32 {
   let v = wp - u.camPos.xyz;
   let dist = length(v);
   let dir = v / max(dist, 1e-3);
@@ -128,11 +128,24 @@ fn applyFog(col: vec3f, wp: vec3f) -> vec3f {
   var mist: f32;
   if (abs(km) > 1e-5) { mist = u.fog.w * exp(-bm * ym) * (1.0 - exp(-km * dist)) / km; }
   else { mist = u.fog.w * exp(-bm * ym) * dist; }
-  let f = 1.0 - exp(-max(amt + mist, 0.0));
+  // the mist lies in drifting banks along the gorge, not as an even layer
+  if (u.fog.w > 1e-5) {
+    let drift = vec2f(u.camPos.w * 1.6, u.camPos.w * 0.7);
+    let mid = (u.camPos.xz + wp.xz) * 0.5;
+    let oct = 2 + i32(u.params.w > 0.5);
+    let banks = fbm((wp.xz + drift) * 0.0035, oct) * 0.6 + fbm((mid + drift) * 0.0035, oct) * 0.4;
+    mist *= 0.3 + 1.6 * smoothstep(0.32, 0.7, banks);
+  }
+  return clamp(1.0 - exp(-max(amt + mist, 0.0)), 0.0, 1.0);
+}
+
+fn applyFog(col: vec3f, wp: vec3f) -> vec3f {
+  let f = fogAmount(wp);
+  let dir = normalize(wp - u.camPos.xyz);
   let sd = max(dot(dir, u.sunDir.xyz), 0.0);
   var fc = skyColor(vec3f(dir.x, max(dir.y, -0.05) * 0.4, dir.z), false);
   fc += u.sunColor.rgb * u.sunDir.w * pow(sd, 8.0) * 0.08;
-  return mix(col, fc, clamp(f, 0.0, 1.0));
+  return mix(col, fc, f);
 }
 
 // ---- shadows & lighting --------------------------------------------------------
@@ -534,9 +547,12 @@ export const OBJECTS = COMMON + OBJ_COMMON + /* wgsl */ `
   return o;
 }
 
-// Sheep: graze with the head down, nibbling, then walk a few steps to fresh
-// grass. Walking time accumulates only while walking, so the path is smooth.
-@vertex fn vs_sheep(v: OIn) -> OOut {
+// Grazing animals (sheep, horses, dogs, tur). Each grazes with the head down,
+// nibbling, then walks a few steps to fresh grass. Walking time accumulates
+// only while walking, so the path is smooth. Meshes are normalised so the
+// neck pivot is at (0, 0.66, 0.45); i1.xy restores the real size and i1.w
+// scales how far the animal wanders.
+@vertex fn vs_animal(v: OIn) -> OOut {
   let t = u.camPos.w;
   let seed = v.i1.z;
   let T = 11.0 + seed * 9.0;
@@ -546,8 +562,8 @@ export const OBJECTS = COMMON + OBJ_COMMON + /* wgsl */ `
   let f = fract(cyc) * T;
   let walkT = k * Tw + clamp(f - (T - Tw), 0.0, Tw);
   let walking = smoothstep(T - Tw - 0.5, T - Tw + 0.3, f) * (1.0 - smoothstep(T - 0.3, T, f));
-  let a = walkT * 0.11 + seed * 6.283;
-  let R = 5.0 + seed * 7.0;
+  let a = walkT * 0.11 / max(v.i1.x, 0.5) + seed * 6.283;
+  let R = (5.0 + seed * 7.0) * v.i1.w;
   let off = vec2f(sin(a), sin(a * 0.7 + 1.3)) * R;
   let dir = vec2f(cos(a), 0.7 * cos(a * 0.7 + 1.3));
   let heading = atan2(dir.x, dir.y);
@@ -555,25 +571,77 @@ export const OBJECTS = COMMON + OBJ_COMMON + /* wgsl */ `
   let y = heightAt(xz);
   var p = v.pos;
   let mat = u32(round(v.col.a * 255.0));
-  if (mat == 7u && p.y > 0.46 && p.z > 0.45) {
+  let stride = sin(t * 10.0 / sqrt(max(v.i1.y, 0.5)) + seed * 20.0);
+  if (mat == 8u) {
     // the head pivots down to the grass
     let graze = 1.0 - walking;
-    let ang = graze * (1.1 + 0.12 * sin(t * 6.0 + seed * 40.0)) + walking * 0.05 * sin(t * 9.0);
+    let ang = graze * (1.1 + 0.12 * sin(t * 6.0 + seed * 40.0)) + walking * 0.05 * stride;
     let pv = vec3f(0.0, 0.66, 0.45);
     let q = p - pv;
     let c = cos(ang); let s = sin(ang);
     p = vec3f(q.x, q.y * c - q.z * s, q.y * s + q.z * c) + pv;
-  } else if (mat == 7u && p.y < 0.46) {
+  } else if (mat == 9u) {
     // legs swing while walking
     let side = select(-1.0, 1.0, p.x * p.z > 0.0);
-    p.z += sin(t * 10.0 + seed * 20.0) * 0.13 * walking * side * (1.0 - p.y / 0.46);
+    p.z += stride * 0.13 * walking * side * clamp(1.0 - p.y / 0.48, 0.0, 1.0);
   } else {
-    p.y += walking * 0.025 * abs(sin(t * 10.0 + seed * 20.0));
+    p.y += walking * 0.02 * abs(stride);
   }
   p *= vec3f(v.i1.x, v.i1.y, v.i1.x);
   let c = cos(heading); let s = sin(heading);
   let wp = vec3f(c * p.x + s * p.z, p.y, -s * p.x + c * p.z) + vec3f(xz.x, y - 0.03, xz.y);
-  let n0 = v.nrm.xyz;
+  let n0 = v.nrm.xyz / vec3f(v.i1.x, v.i1.y, v.i1.x);
+  var o: OOut;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.wp = wp;
+  o.n = normalize(vec3f(c * n0.x + s * n0.z, n0.y, -s * n0.x + c * n0.z));
+  o.col = v.col;
+  o.lp = v.pos;
+  o.seed = seed;
+  return o;
+}
+
+// A wolf pack trotting in single file around a wide loop, now and then
+// stopping together. i0.xz: loop centre, i0.w: place in the file,
+// i1.w: loop radius; the pack shares its timing.
+@vertex fn vs_wolf(v: OIn) -> OOut {
+  let t = u.camPos.w;
+  let seed = v.i1.z;
+  let T = 30.0;
+  let Tw = 23.0;
+  let f = fract(t / T) * T;
+  let walkT = floor(t / T) * Tw + clamp(f, 0.0, Tw);
+  let moving = 1.0 - smoothstep(Tw - 1.0, Tw, f) * (1.0 - smoothstep(T - 0.8, T, f));
+  let R = v.i1.w;
+  let a = walkT * 3.4 / R - v.i0.w * 7.5 / R;
+  let lat = (fract(seed * 13.7) - 0.5) * 4.0;
+  let xz = v.i0.xz + vec2f(cos(a), sin(a)) * (R + lat);
+  let heading = atan2(-sin(a), cos(a));
+  let y = heightAt(xz);
+  var p = v.pos;
+  let mat = u32(round(v.col.a * 255.0));
+  let trot = sin(t * 11.0 + seed * 9.0);
+  if (mat == 8u) {
+    // head carried low while trotting; raised and turning while they stop
+    let ang = moving * 0.25 - (1.0 - moving) * 0.15;
+    let pv = vec3f(0.0, 0.66, 0.45);
+    let q = p - pv;
+    let c = cos(ang); let s = sin(ang);
+    p = vec3f(q.x, q.y * c - q.z * s, q.y * s + q.z * c) + pv;
+    let turn = (1.0 - moving) * 0.5 * sin(t * 0.8 + seed * 5.0);
+    let ct = cos(turn); let st = sin(turn);
+    let r = p - pv;
+    p = vec3f(ct * r.x + st * r.z, r.y, -st * r.x + ct * r.z) + pv;
+  } else if (mat == 9u) {
+    let side = select(-1.0, 1.0, p.x * p.z > 0.0);
+    p.z += trot * 0.16 * moving * side * clamp(1.0 - p.y / 0.48, 0.0, 1.0);
+  } else {
+    p.y += moving * 0.025 * abs(trot);
+  }
+  p *= vec3f(v.i1.x, v.i1.y, v.i1.x);
+  let c = cos(heading); let s = sin(heading);
+  let wp = vec3f(c * p.x + s * p.z, p.y, -s * p.x + c * p.z) + vec3f(xz.x, y - 0.03, xz.y);
+  let n0 = v.nrm.xyz / vec3f(v.i1.x, v.i1.y, v.i1.x);
   var o: OOut;
   o.pos = u.viewProj * vec4f(wp, 1.0);
   o.wp = wp;
@@ -666,10 +734,32 @@ fn masonry(wp: vec3f, n: vec3f, dist: f32) -> vec2f {
     albedo *= 0.85 + 0.25 * vnoise(in.wp.xz * 9.0 + in.wp.y * 9.0);
     wrap = 0.4;
     ao = 0.85;
+  } else if (mat >= 8u && mat <= 10u) {
+    // animal coats: each animal its own shade
+    let k = fract(in.seed * 7.13);
+    albedo *= mix(vec3f(0.55, 0.5, 0.48), vec3f(1.3, 1.15, 0.95), k);
+    albedo *= 0.9 + 0.2 * vnoise(in.wp.xz * 8.0 + in.wp.y * 8.0);
+    wrap = 0.3;
+  } else if (mat == 11u) {
+    albedo = vec3f(0.018, 0.015, 0.012);
+  } else if (mat == 12u) {
+    // hay: streaky straw
+    albedo *= 0.75 + 0.45 * vnoise(vec2f(atan2(in.lp.x, in.lp.z) * 6.0, in.lp.y * 14.0));
+    wrap = 0.3;
+    ao = groundAO;
+  } else if (mat == 13u) {
+    albedo *= 0.8 + 0.3 * vnoise(vec2f(in.wp.y * 20.0, dot(in.wp.xz, vec2f(0.7)) * 2.0));
   }
 
   let vis = objectSunVis(in.wp, n);
   var c = shade(albedo, n, vis, ao, wrap);
+  if (mat == 11u) {
+    // warm firelight in about half the windows, after dark
+    let cell = floor(in.wp * 0.8);
+    let on = step(0.45, hash21(cell.xz + cell.y * 7.0));
+    let flick = 0.85 + 0.15 * sin(u.camPos.w * 7.0 + hash21(cell.xz) * 40.0) * sin(u.camPos.w * 3.1 + cell.y);
+    c += vec3f(1.0, 0.55, 0.2) * 2.4 * on * flick * u.glow.w;
+  }
   if (mat == 1u) {
     // light through leaves
     let v = normalize(in.wp - u.camPos.xyz);
@@ -704,16 +794,19 @@ export const BIRDS = COMMON + OBJ_COMMON + /* wgsl */ `
   let s = 1.0;
   let up = normalize(vec3f(0.0, 1.0, 0.0) * cos(bank) + right * sin(bank));
   let rr = normalize(cross(up, fwd));
-  let wp = pos + (rr * p.x + up * p.y + fwd * p.z) * s * 1.8;
+  let size = select(1.8, v.i1.w, v.i1.w > 0.0);
+  let wp = pos + (rr * p.x + up * p.y + fwd * p.z) * s * size;
   let n = normalize(rr * v.nrm.x + up * v.nrm.y + fwd * v.nrm.z);
   var o: OOut;
   o.pos = u.viewProj * vec4f(wp, 1.0);
-  o.wp = wp; o.n = n; o.col = v.col; o.lp = v.pos; o.seed = 0.0;
+  o.wp = wp; o.n = n; o.col = v.col; o.lp = v.pos; o.seed = v.i1.w;
   return o;
 }
 @fragment fn fs(in: OOut) -> @location(0) vec4f {
   let n = normalize(in.n);
-  let c = shade(in.col.rgb, n * sign(dot(n, u.camPos.xyz - in.wp) + 1e-4), 1.0, 1.0, 0.3);
+  // bearded vultures (larger) are paler, with rusty bellies
+  let col = select(in.col.rgb, in.col.rgb * vec3f(2.6, 2.1, 1.6), in.seed > 2.2);
+  let c = shade(col, n * sign(dot(n, u.camPos.xyz - in.wp) + 1e-4), 1.0, 1.0, 0.3);
   return vec4f(applyFog(c, in.wp), 1.0);
 }
 `;
@@ -846,6 +939,55 @@ struct L { sun: vec4f, world: vec4f };
 @group(0) @binding(0) var<uniform> l: L;
 @group(0) @binding(1) var heightTex: texture_2d<f32>;
 @group(0) @binding(2) var outTex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var aoTex: texture_2d<f32>;
+fn H(p: vec2f) -> f32 {
+  let n = l.world.z;
+  let g = clamp(p, vec2f(0.0), vec2f(n - 1.001));
+  let i = vec2i(floor(g));
+  let f = g - floor(g);
+  let a = textureLoad(heightTex, i, 0).r;
+  let b = textureLoad(heightTex, i + vec2i(1, 0), 0).r;
+  let c = textureLoad(heightTex, i + vec2i(0, 1), 0).r;
+  let d = textureLoad(heightTex, i + vec2i(1, 1), 0).r;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+// Soft terrain shadows toward the key light (sun or moon), and the height
+// above the ground at which that light becomes visible. Ambient occlusion
+// comes from aoTex, computed once.
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let n = u32(l.world.z);
+  if (id.x >= n || id.y >= n) { return; }
+  let cell = l.world.y;
+  let p0 = vec2f(id.xy);
+  let h0 = textureLoad(heightTex, vec2i(id.xy), 0).r + 0.5;
+  let sd = normalize(l.sun.xz + vec2f(1e-5));
+  let tanS = l.sun.y / max(length(l.sun.xz), 1e-4);
+  var maxRise = -1e9;
+  var minMargin = 1e9;
+  var dist = 0.6;
+  for (var i = 0; i < 140; i++) {
+    let p = p0 + sd * dist;
+    if (any(p < vec2f(0.0)) || any(p > vec2f(l.world.z - 1.0))) { break; }
+    let hs = H(p);
+    let dm = dist * cell;
+    let rise = hs - (h0 + dm * tanS);
+    maxRise = max(maxRise, rise);
+    minMargin = min(minMargin, -rise / dm);
+    dist = dist * 1.045 + 0.4;
+  }
+  let surf = smoothstep(-0.012, 0.03, minMargin);
+  let ao = textureLoad(aoTex, vec2i(id.xy), 0).r;
+  textureStore(outTex, vec2i(id.xy), vec4f(surf, ao, max(maxRise, 0.0), 0.0));
+}
+`;
+
+// Ambient occlusion from the horizon in 8 directions (computed once).
+export const AO_CS = /* wgsl */ `
+struct L { sun: vec4f, world: vec4f };
+@group(0) @binding(0) var<uniform> l: L;
+@group(0) @binding(1) var heightTex: texture_2d<f32>;
+@group(0) @binding(2) var aoOut: texture_storage_2d<r32float, write>;
 fn H(p: vec2f) -> f32 {
   let n = l.world.z;
   let g = clamp(p, vec2f(0.0), vec2f(n - 1.001));
@@ -864,24 +1006,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let cell = l.world.y;
   let p0 = vec2f(id.xy);
   let h0 = textureLoad(heightTex, vec2i(id.xy), 0).r + 0.5;
-  let sd = normalize(l.sun.xz);
-  let tanS = l.sun.y / max(length(l.sun.xz), 1e-4);
-  var maxRise = -1e9;
-  var minMargin = 1e9;
-  var dist = 0.6;
-  for (var i = 0; i < 140; i++) {
-    let p = p0 + sd * dist;
-    if (any(p < vec2f(0.0)) || any(p > vec2f(l.world.z - 1.0))) { break; }
-    let hs = H(p);
-    let dm = dist * cell;
-    let rise = hs - (h0 + dm * tanS);
-    maxRise = max(maxRise, rise);
-    minMargin = min(minMargin, -rise / dm);
-    dist = dist * 1.045 + 0.4;
-  }
-  // penumbra: soft over a small angular band
-  let surf = smoothstep(-0.012, 0.03, minMargin);
-  // ambient occlusion from the horizon in 8 directions
   var occ = 0.0;
   for (var k = 0; k < 8; k++) {
     let a = f32(k) * 0.785398 + 0.39;
@@ -896,8 +1020,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     }
     occ += sin(atan(hor));
   }
-  let ao = clamp(1.0 - occ / 8.0 * 1.1, 0.0, 1.0);
-  textureStore(outTex, vec2i(id.xy), vec4f(surf, ao, max(maxRise, 0.0), 0.0));
+  textureStore(aoOut, vec2i(id.xy), vec4f(clamp(1.0 - occ / 8.0 * 1.1, 0.0, 1.0), 0.0, 0.0, 0.0));
 }
 `;
 
@@ -1057,5 +1180,70 @@ fn historyAt(uv: vec2f) -> vec3f {
   let motion = length((puv - in.uv) * r.size.zw);
   let alpha = clamp(0.03 + 0.1 * wmax + motion * 0.01, 0.03, 0.4);
   return vec4f(unsquash(mix(h, current, alpha)), 1.0);
+}
+`;
+
+// ---- effects: signal fires, their glow, waterfall spray -------------------------------
+// Camera-facing quads, added on top of the scene. Fires burn only after dark.
+export const FX = COMMON + /* wgsl */ `
+struct FIn { @location(0) p: vec4f, @location(1) q: vec4f }; // xyz, size | kind, seed, -, -
+struct FOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+  @location(1) kind: f32,
+  @location(2) seed: f32,
+  @location(3) wp: vec3f,
+};
+@vertex fn vs(@builtin(vertex_index) vi: u32, f: FIn) -> FOut {
+  var corners = array<vec2f, 6>(vec2f(-1.0, 0.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0), vec2f(-1.0, 0.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
+  let c = corners[vi];
+  let kind = f.q.x;
+  var right = normalize(vec3f(u.camRight.x, 0.0, u.camRight.z));
+  var up = vec3f(0.0, 1.0, 0.0);
+  var uv = c;
+  var centre = f.p.xyz;
+  if (kind > 0.5) {
+    // glow and spray: fully camera-facing, centred
+    right = u.camRight.xyz;
+    up = u.camUp.xyz;
+    uv = vec2f(c.x, c.y * 2.0 - 1.0);
+  }
+  let size = f.p.w;
+  let wp = centre + right * uv.x * size * select(0.5, 1.0, kind > 0.5) + up * uv.y * size;
+  var o: FOut;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.uv = uv;
+  o.kind = kind;
+  o.seed = f.q.y;
+  o.wp = wp;
+  return o;
+}
+@fragment fn fs(in: FOut) -> @location(0) vec4f {
+  let t = u.camPos.w;
+  let night = u.glow.w;
+  let fogKeep = 1.0 - fogAmount(in.wp);
+  var c = vec3f(0.0);
+  if (in.kind < 0.5) {
+    // flame: rising noise shaped into a tongue, hot at the core
+    let uv = in.uv;
+    let n = fbm(vec2f(uv.x * 2.2 + in.seed * 9.0, uv.y * 2.6 - t * 3.2), 3);
+    let shape = (1.0 - uv.y) * 1.15 - abs(uv.x) * (1.4 - uv.y * 0.6) + (n - 0.5) * 0.9;
+    let core = smoothstep(0.05, 0.75, shape);
+    let col = mix(vec3f(0.9, 0.12, 0.02), mix(vec3f(1.0, 0.55, 0.1), vec3f(1.0, 0.9, 0.6), smoothstep(0.5, 0.9, core)), smoothstep(0.1, 0.5, core));
+    c = col * core * 7.0 * night;
+  } else if (in.kind < 1.5) {
+    // warm halo around a fire, flickering
+    let r = length(in.uv);
+    let flick = 0.8 + 0.2 * sin(t * 9.0 + in.seed * 30.0) * sin(t * 4.3 + in.seed * 11.0);
+    c = vec3f(1.0, 0.45, 0.12) * pow(max(1.0 - r, 0.0), 2.6) * 0.9 * flick * night;
+  } else {
+    // waterfall spray: soft drifting mist, lit by the sky and the key light
+    let r = length(in.uv);
+    let n = fbm(in.uv * 1.6 + vec2f(in.seed * 5.0, -t * 0.5), 3);
+    let a = pow(max(1.0 - r, 0.0), 1.8) * smoothstep(0.25, 0.75, n) * 0.18;
+    let light = ambient(vec3f(0.0, 1.0, 0.0)) * 0.6 + u.sunColor.rgb * u.sunDir.w * 0.35;
+    c = light * a;
+  }
+  return vec4f(c * fogKeep, 0.0);
 }
 `;

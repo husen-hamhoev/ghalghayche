@@ -12,7 +12,11 @@ export const TIMES = [
   { id: 'noon', label: 'Midday', hour: 12.8, mist: 0.0, fog: 0.85, clouds: 0.46 },
   { id: 'golden', label: 'Golden hour', hour: 17.6, mist: 0.0002, fog: 1.0, clouds: 0.4 },
   { id: 'evening', label: 'Evening', night: true, mist: 0.0012, fog: 0.9, clouds: 0.26 },
+  { id: 'cycle', label: 'Day & night', cycle: true },
 ];
+
+// Real seconds for one full day in the automatic cycle.
+export const DAY_SECONDS = 960;
 
 const mix3 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 const dirFrom = (azDeg, elDeg) => {
@@ -26,14 +30,16 @@ const COMMON = {
   fogBase: 1040,
 };
 
-export function environment(preset) {
+export function environment(preset, hour) {
+  if (preset.cycle) return cycle(hour ?? 18.6);
   if (preset.night) return evening(preset);
-
   const s = clamp((preset.hour - 6.0) / 13.0, 0, 1);
   const elevDeg = 2.2 + 56 * Math.sin(Math.PI * s);
-  const sunDir = dirFrom(95 + 170 * s, elevDeg);
-  const elev = elevDeg * DEG;
+  return daylight(dirFrom(95 + 170 * s, elevDeg), elevDeg, preset);
+}
 
+function daylight(sunDir, elevDeg, preset) {
+  const elev = elevDeg * DEG;
   // Extinction through the air mass tints the low sun.
   const airmass = 1 / (Math.sin(elev) + 0.15 * Math.pow(elevDeg + 3.885, -1.253));
   const beta = [0.028, 0.075, 0.19];
@@ -60,6 +66,47 @@ export function environment(preset) {
     skySun: sunDir, glow: sunColor, glowStrength: 1, stars: 0,
     moonDir: [0, 1, 0], moon: 0,
   };
+}
+
+// Continuous day and night. The sun rises in the east at six and sets in the
+// west at eighteen; a full moon rises opposite it at dusk. One key light casts
+// the shadows: the sun while it is up, then the moon. At the hand-over both
+// are near zero, so the switch cannot be seen.
+export function cycle(hour) {
+  const h = ((hour % 24) + 24) % 24;
+  const sunEl = 60 * Math.sin((2 * Math.PI * (h - 6)) / 24);
+  const sunAz = 90 + (h - 6) * 15;
+  const moonEl = 50 * Math.sin((2 * Math.PI * (h - 17.3)) / 24);
+  const moonAz = sunAz + 180;
+  const sunDir = dirFrom(sunAz, sunEl);
+  const moonDir = dirFrom(moonAz, moonEl);
+
+  const day = daylight(dirFrom(sunAz, Math.max(sunEl, 1.5)), Math.max(sunEl, 1.5), { fog: 1, mist: 0.0003, clouds: 0.38 });
+  const night = evening({ fog: 0.9, mist: 0.0012, clouds: 0.26 });
+  const w = smoothstep(-5, 5, sunEl); // 1 = day
+  const mixv = (a, b) => (Array.isArray(a) ? mix3(a, b, w) : lerp(a, b, w));
+
+  const env = {};
+  for (const k of ['zenith', 'horizon', 'ambient', 'exposure', 'fogDensity', 'cloudCover']) env[k] = mixv(night[k], day[k]);
+  // valley mist gathers at night and at dawn
+  env.mist = lerp(night.mist, day.mist, w) + 0.0012 * Math.exp(-(((h - 6.5) / 1.2) ** 2));
+
+  if (sunEl > -1) {
+    env.sunDir = dirFrom(sunAz, Math.max(sunEl, 0.5));
+    env.sunColor = day.sunColor;
+    env.sunIntensity = day.sunIntensity * smoothstep(-1, 4, sunEl);
+  } else {
+    env.sunDir = moonDir[1] > 0.02 ? moonDir : [moonDir[0], 0.02, moonDir[2]];
+    env.sunColor = night.sunColor;
+    env.sunIntensity = night.sunIntensity * smoothstep(-1, -6, sunEl) * smoothstep(-1, 6, moonEl);
+  }
+  env.skySun = sunDir;
+  env.glow = mix3([0.95, 0.4, 0.15], day.sunColor, smoothstep(-2, 8, sunEl));
+  env.glowStrength = smoothstep(-16, -2, sunEl) * lerp(0.45, 1, smoothstep(-4, 2, sunEl));
+  env.stars = 1 - smoothstep(-10, -1, sunEl);
+  env.moonDir = moonDir;
+  env.moon = smoothstep(-1, 5, moonEl) * (1 - 0.75 * w);
+  return { ...COMMON, ...env, hour: h };
 }
 
 // Blue hour: the sun just gone behind the western ridges, a warm afterglow,

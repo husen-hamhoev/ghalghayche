@@ -5,7 +5,7 @@ import { planWorld, buildStructures, scatter, buildWater, makeViewpoints } from 
 import { Renderer } from './renderer.js';
 import { Soundscape } from './audio.js';
 import { PRESETS, ORDER, loadSettings, saveSettings, AutoQuality } from './quality.js';
-import { TIMES, environment } from './env.js';
+import { TIMES, DAY_SECONDS, environment } from './env.js';
 import { perspectiveRZ, viewFromBasis, mat4mul, clamp, lerp, smoothstep, v3 } from './math.js';
 
 const $ = (id) => document.getElementById(id);
@@ -49,7 +49,7 @@ async function main() {
   const structures = buildStructures(terrain, plan);
   const viewpoints = makeViewpoints(terrain, plan);
   const sets = scatter(terrain, plan, 1);
-  const water = buildWater();
+  const water = buildWater(plan.waterfall);
   setProgress(0.88, 'Lighting the gorge');
   await tick();
 
@@ -57,7 +57,10 @@ async function main() {
   const renderer = new Renderer(device, context, format);
   renderer.init({ terrain, structures, scatter: sets, water }, quality);
   renderer.density = quality.density;
-  let env = environment(TIMES.find((t) => t.id === settings.time));
+  // clock for the automatic day & night cycle (starts just before sunset)
+  let clock = parseFloat(params.get('hour')) || 17.4;
+  let env = environment(TIMES.find((t) => t.id === settings.time), clock);
+  let lightDir = env.sunDir;
   renderer.computeLight(env.sunDir);
   await device.queue.onSubmittedWorkDone();
   setProgress(1, 'Ready');
@@ -256,10 +259,14 @@ async function main() {
   );
   const applyTime = (id) => {
     settings.time = id; saveSettings(settings);
-    env = environment(TIMES.find((t) => t.id === id));
+    const preset = TIMES.find((t) => t.id === id);
+    if (preset.cycle) clock = 17.4;
+    env = environment(preset, clock);
     renderer.computeLight(env.sunDir);
+    lightDir = env.sunDir;
     renderer.resetHistory = true;
   };
+  const fmtClock = (h) => `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
   const setSound = (on) => {
     settings.sound = on; saveSettings(settings);
     audio.setEnabled(on);
@@ -369,6 +376,14 @@ async function main() {
   if (params.has('stats')) $('stats').hidden = false;
   if (params.has('noauto')) auto.enabled = false;
 
+  // distances for the soundscape
+  const nearestOn = (pts) => {
+    let best = 1e9;
+    for (let i = 0; i < pts.length; i += 4) best = Math.min(best, v3.len(v3.sub(cam.pos, [pts[i].x, pts[i].y, pts[i].z])));
+    return best;
+  };
+  const campfire = [plan.fold.x + 18, terrain.sample(plan.fold.x + 18, plan.fold.z + 9), plan.fold.z + 9];
+
   // ---- frame loop ------------------------------------------------------------------------
   let last = performance.now();
   let fade = AUTO ? 1 : 0;
@@ -398,6 +413,17 @@ async function main() {
     cam.proj = perspectiveRZ(cam.fov, w / h, 0.3);
 
     fade = Math.min(1, fade + dt * 0.6);
+    if (settings.time === 'cycle') {
+      // half speed around sunrise and sunset, the most beautiful hours
+      const sunEl = 60 * Math.sin((2 * Math.PI * (clock - 6)) / 24);
+      const pace = lerp(0.45, 1, smoothstep(8, 18, Math.abs(sunEl)));
+      clock = (clock + (dt * 24 * pace) / DAY_SECONDS) % 24;
+      env = environment(TIMES.find((t) => t.id === 'cycle'), clock);
+      // shadows follow the key light; recompute when it has moved a little
+      const moved = Math.acos(clamp(v3.dot(env.sunDir, lightDir), -1, 1));
+      if (moved > (quality.detail === 0 ? 0.03 : 0.008)) { renderer.computeLight(env.sunDir); lightDir = env.sunDir; }
+      if (menuOpen) $('time').querySelector('button:last-child').textContent = `Day & night · ${fmtClock(clock)}`;
+    }
     env.fade = fade;
     renderer.render(cam, env, time);
 
@@ -413,6 +439,8 @@ async function main() {
     audio.update(dt, {
       aboveGround: cam.pos[1] - ground, altitude: cam.pos[1], riverDist: rd,
       speed: v3.len(cam.vel), flockDist: flockD, forest: terrain.splat[(fj * N + fi) * 4 + 2] / 255,
+      night: env.stars, waterfallDist: nearestOn(plan.waterfall), fireDist: v3.len(v3.sub(cam.pos, campfire)),
+      wolfDist: plan.wolves ? Math.hypot(cam.pos[0] - plan.wolves.x, cam.pos[2] - plan.wolves.z) : 1e9,
     });
 
     if (started) updateMarks();

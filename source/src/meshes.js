@@ -6,7 +6,16 @@
 
 import { noise3, lerp, clamp } from './math.js';
 
-export const MAT = { STONE: 0, LEAF: 1, BARK: 2, DARK: 3, ROCK: 4, SLATE: 5, WOOL: 6, PLAIN: 7 };
+export const MAT = {
+  STONE: 0, LEAF: 1, BARK: 2, DARK: 3, ROCK: 4, SLATE: 5, WOOL: 6, PLAIN: 7,
+  HEAD: 8, LEG: 9, COAT: 10, // animals: the head dips to graze, legs swing
+  LIT: 11, // window or door with warm firelight inside after dark
+  HAY: 12, WOOD: 13,
+};
+
+// Openings built while this is on glow warmly at night (inhabited houses).
+let openingMat = 3;
+export function litWindows(on) { openingMat = on ? 11 : 3; }
 
 export class MeshBuilder {
   constructor() {
@@ -182,7 +191,7 @@ function opening(b, face, s, y, w, h, halfAt) {
       default: return [-d, yy, a];
     }
   });
-  b.quad(P[0], P[1], P[2], P[3], DARK, MAT.DARK);
+  b.quad(P[0], P[1], P[2], P[3], DARK, openingMat);
 }
 
 // Battle tower (vov): tall, tapering, crowned by a stepped pyramid roof.
@@ -234,6 +243,21 @@ export function battleTower(b, x, y, z, rot, rng, opt = {}) {
   }
   b.at(x, y, z, rot);
   for (let face = 0; face < 4; face++) opening(b, face, 0, H - 1.4, 0.45, 0.8, half);
+
+  if (opt.beacon) {
+    // signal tower: a flat platform with a parapet and corner horns, where
+    // fires were lit to pass a warning from tower to tower along the gorge
+    const w = top + 0.4;
+    b.taper(0, H, 0, w, w, w, w, 0.35, SLATE, MAT.SLATE);
+    for (const [cx, cz, ww, dd] of [[0, w / 2 - 0.2, w, 0.4], [0, -w / 2 + 0.2, w, 0.4], [w / 2 - 0.2, 0, 0.4, w], [-w / 2 + 0.2, 0, 0.4, w]]) {
+      b.box(cx, H + 0.35, cz, ww, 0.75, dd, col, MAT.STONE);
+    }
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      b.taper(sx * (w / 2 - 0.3), H + 1.1, sz * (w / 2 - 0.3), 0.6, 0.6, 0.12, 0.12, 1.1, col, MAT.STONE);
+    }
+    b.box(0, H + 0.35, 0, 1.2, 0.25, 1.2, [0.08, 0.06, 0.05], MAT.PLAIN); // hearth
+    return { fire: b.tf([0, H + 0.6, 0]) };
+  }
 
   // cornice, then the stepped roof of slate slabs and the cone keystone
   b.taper(0, H, 0, top + 0.45, top + 0.45, top + 0.45, top + 0.45, 0.28, SLATE, MAT.SLATE);
@@ -406,7 +430,7 @@ export function broadleafMesh(lod) {
 
 export function rockMesh() {
   const b = new MeshBuilder();
-  b.blob(0, 0.15, 0, 1, 0.62, 1, 2, [0.27, 0.255, 0.23], MAT.ROCK, 0.45, 5);
+  b.blob(0, 0.05, 0, 1, 0.62, 1, 2, [0.27, 0.255, 0.23], MAT.ROCK, 0.28, 5); // gentle bumps: no overhanging caps
   return b.build();
 }
 
@@ -445,14 +469,152 @@ export function cragMesh() {
   return b.build();
 }
 
+// Real-size instance scales [xz, y] for the normalised animal meshes below
+// (neck pivot height / 0.66, neck pivot depth / 0.45).
+export const ANIMAL_SCALE = {
+  sheep: [1, 1], horse: [0.8 / 0.45, 1.42 / 0.66], dog: [0.42 / 0.45, 0.66 / 0.66],
+  wolf: [0.44 / 0.45, 0.7 / 0.66], tur: [0.5 / 0.45, 0.95 / 0.66],
+};
+
+// Normalise an animal so its neck pivot lands at (0, 0.66, 0.45); the
+// instance scale (sxz, sy) brings back its real size.
+function normaliseAnimal(b, pivotY, pivotZ) {
+  const kxz = 0.45 / pivotZ, ky = 0.66 / pivotY;
+  for (let i = 0; i < b.p.length; i += 3) {
+    b.p[i] *= kxz; b.p[i + 1] *= ky; b.p[i + 2] *= kxz;
+    const nx = b.n[i] / kxz, ny = b.n[i + 1] / ky, nz = b.n[i + 2] / kxz, l = Math.hypot(nx, ny, nz) || 1;
+    b.n[i] = nx / l; b.n[i + 1] = ny / l; b.n[i + 2] = nz / l;
+  }
+  return { mesh: b.build(), sxz: 1 / kxz, sy: 1 / ky };
+}
+
+export function horseMesh() {
+  const b = new MeshBuilder();
+  const coat = [0.32, 0.2, 0.12], dark = [0.08, 0.06, 0.05];
+  b.blob(0, 1.25, 0, 0.34, 0.42, 0.85, 1, coat, MAT.COAT, 0.08, 4);
+  b.blob(0, 1.3, 0.62, 0.3, 0.38, 0.32, 1, coat, MAT.COAT, 0.06, 5); // chest
+  // neck and head (dip together)
+  b.at(0, 0, 0, 0);
+  b.taper(0, 1.38, 0.95, 0.26, 0.4, 0.2, 0.3, 0.62, coat, MAT.HEAD);
+  b.box(0, 1.6, 1.28, 0.22, 0.3, 0.6, coat, MAT.HEAD);
+  b.box(0, 1.98, 1.02, 0.08, 0.5, 0.1, dark, MAT.HEAD); // mane
+  b.box(-0.07, 1.98, 1.06, 0.04, 0.12, 0.05, coat, MAT.HEAD);
+  b.box(0.07, 1.98, 1.06, 0.04, 0.12, 0.05, coat, MAT.HEAD);
+  for (const [lx, lz] of [[-0.18, -0.6], [0.18, -0.6], [-0.18, 0.6], [0.18, 0.6]]) b.box(lx, 0, lz, 0.13, 1.05, 0.13, coat.map((v) => v * 0.8), MAT.LEG);
+  b.taper(0, 0.75, -0.92, 0.1, 0.1, 0.14, 0.14, 0.6, dark, MAT.COAT); // tail
+  return normaliseAnimal(b, 1.42, 0.8);
+}
+
+export function dogMesh() {
+  const b = new MeshBuilder();
+  const coat = [0.36, 0.3, 0.22], dark = [0.1, 0.08, 0.06];
+  b.blob(0, 0.6, 0, 0.24, 0.26, 0.48, 1, coat, MAT.COAT, 0.12, 8);
+  b.blob(0, 0.72, 0.5, 0.17, 0.17, 0.18, 1, coat, MAT.HEAD, 0.08, 9);
+  b.box(0, 0.66, 0.68, 0.1, 0.1, 0.16, dark, MAT.HEAD);
+  b.box(-0.08, 0.86, 0.48, 0.05, 0.08, 0.04, dark, MAT.HEAD);
+  b.box(0.08, 0.86, 0.48, 0.05, 0.08, 0.04, dark, MAT.HEAD);
+  for (const [lx, lz] of [[-0.12, -0.32], [0.12, -0.32], [-0.12, 0.32], [0.12, 0.32]]) b.box(lx, 0, lz, 0.08, 0.46, 0.08, coat, MAT.LEG);
+  b.taper(0, 0.6, -0.5, 0.08, 0.08, 0.1, 0.1, 0.25, coat, MAT.COAT);
+  return normaliseAnimal(b, 0.66, 0.42);
+}
+
+export function wolfMesh() {
+  const b = new MeshBuilder();
+  const fur = [0.32, 0.3, 0.27], pale = [0.5, 0.47, 0.42], dark = [0.08, 0.07, 0.06];
+  b.blob(0, 0.62, 0, 0.2, 0.25, 0.55, 1, fur, MAT.COAT, 0.1, 11);
+  b.blob(0, 0.6, 0.18, 0.18, 0.22, 0.3, 1, pale, MAT.COAT, 0.08, 12);
+  b.blob(0, 0.74, 0.58, 0.15, 0.15, 0.17, 1, fur, MAT.HEAD, 0.06, 13);
+  b.taper(0, 0.64, 0.8, 0.12, 0.12, 0.06, 0.07, 0.01, dark, MAT.HEAD);
+  b.box(0, 0.66, 0.78, 0.09, 0.09, 0.22, fur, MAT.HEAD); // muzzle
+  b.pyramid(-0.07, 0.84, 0.54, 0.07, 0.05, 0.13, fur, MAT.HEAD);
+  b.pyramid(0.07, 0.84, 0.54, 0.07, 0.05, 0.13, fur, MAT.HEAD);
+  for (const [lx, lz] of [[-0.1, -0.36], [0.1, -0.36], [-0.1, 0.36], [0.1, 0.36]]) b.box(lx, 0, lz, 0.07, 0.48, 0.07, fur, MAT.LEG);
+  b.taper(0, 0.42, -0.62, 0.08, 0.08, 0.12, 0.12, 0.34, fur, MAT.COAT); // bushy tail
+  return normaliseAnimal(b, 0.7, 0.44);
+}
+
+// East Caucasian tur: a stocky wild goat with heavy, back-sweeping horns.
+export function turMesh() {
+  const b = new MeshBuilder();
+  const coat = [0.36, 0.26, 0.16], horn = [0.2, 0.17, 0.13], dark = [0.1, 0.07, 0.05];
+  b.blob(0, 0.78, 0, 0.26, 0.32, 0.55, 1, coat, MAT.COAT, 0.1, 14);
+  b.blob(0, 0.92, 0.55, 0.15, 0.17, 0.2, 1, coat, MAT.HEAD, 0.06, 15);
+  b.box(0, 0.82, 0.72, 0.1, 0.12, 0.18, dark, MAT.HEAD);
+  for (const sx of [-1, 1]) {
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 5) * 2.4;
+      b.box(sx * (0.07 + k * 0.025), 1.02 + Math.sin(a) * 0.28, 0.5 - (1 - Math.cos(a)) * 0.22, 0.06 - k * 0.006, 0.08, 0.08, horn, MAT.HEAD);
+    }
+  }
+  for (const [lx, lz] of [[-0.13, -0.38], [0.13, -0.38], [-0.13, 0.38], [0.13, 0.38]]) b.box(lx, 0, lz, 0.09, 0.52, 0.09, dark, MAT.LEG);
+  return normaliseAnimal(b, 0.95, 0.5);
+}
+
+// Hay stacked around a pole on the terraces.
+export function hayMesh() {
+  const b = new MeshBuilder();
+  const hay = [0.4, 0.31, 0.14];
+  b.blob(0, 1.1, 0, 1.15, 1.25, 1.15, 1, hay, MAT.HAY, 0.08, 21);
+  b.cone(0, 1.6, 0, 1.05, 1.6, 7, hay, MAT.HAY, 0.05, 0.3);
+  b.cylinder(0, 2.8, 0, 0.05, 0.04, 1.0, 4, [0.22, 0.16, 0.1], MAT.WOOD, false);
+  return b.build();
+}
+
+// Old stone arch bridge across the river: a single steep arch.
+export function archBridge(b, cx, cz, rot, span, waterY, groundA, groundB, rng) {
+  b.at(cx, 0, cz, rot);
+  const col = stoneCol(rng);
+  const n = 22, W = 3.2;
+  const rise = Math.min(span * 0.36, 7.5);
+  for (let i = 0; i < n; i++) {
+    const s0 = i / n, s1 = (i + 1) / n, sm = (s0 + s1) / 2;
+    const z = (sm - 0.5) * span;
+    const u = (2 * sm - 1) ** 2;
+    const under = waterY + 0.6 + rise * (1 - u);
+    const deckEnds = lerp(groundA, groundB, sm);
+    const top = Math.max(deckEnds, under + 1.0 + 0.6 * (1 - u));
+    const bottom = Math.min(under, Math.min(groundA, groundB) - 3 + (1 - u) * 50);
+    b.box(0, bottom, z, W, top - bottom, span / n + 0.06, col, MAT.STONE);
+    b.box(-W / 2 + 0.17, top, z, 0.34, 0.55, span / n + 0.06, col, MAT.STONE);
+    b.box(W / 2 - 0.17, top, z, 0.34, 0.55, span / n + 0.06, col, MAT.STONE);
+  }
+  for (const [e, g] of [[-0.5, groundA], [0.5, groundB]]) b.box(0, g - 4, e * (span + 3), W + 1.2, 4.6, 3, col, MAT.STONE);
+}
+
+// Watermill: a small stone hut on the bank, fed by a wooden chute.
+export function watermill(b, x, y, z, rot, rng, waterY) {
+  b.at(x, y, z, rot);
+  const col = stoneCol(rng);
+  const wood = [0.24, 0.17, 0.11];
+  const base = Math.min(-3, waterY - y - 1.5);
+  b.box(0, base, 0, 3.6, 0.25 - base, 3.8, col, MAT.STONE);
+  b.box(0, 0.2, 0, 3.2, 2.3, 3.4, col, MAT.STONE);
+  b.pyramid(0, 2.5, 0, 3.9, 4.1, 1.5, SLATE, MAT.SLATE);
+  opening(b, 2, 0, 1.05, 0.8, 1.5, () => 1.7);
+  // chute running upstream along the bank, falling toward the hut
+  for (let i = 0; i < 6; i++) b.box(0.9, 1.6 + i * 0.32, 2.6 + i * 1.6, 0.5, 0.25, 1.65, wood, MAT.WOOD);
+  for (let i = 0; i < 6; i += 2) b.box(0.9, Math.min(0, waterY - y), 2.6 + i * 1.6, 0.14, 1.6 + i * 0.32 - Math.min(0, waterY - y), 0.14, wood, MAT.WOOD);
+}
+
+// Shepherd's hut: low stone walls and a slab roof.
+export function hut(b, x, y, z, rot, rng) {
+  b.at(x, y, z, rot);
+  const col = stoneCol(rng);
+  b.box(0, -2.5, 0, 5, 2.8, 4.2, col, MAT.STONE);
+  b.box(0, 0.3, 0, 4.6, 2.1, 3.8, col, MAT.STONE);
+  b.box(0, 2.4, 0, 5.0, 0.25, 4.2, SLATE, MAT.SLATE);
+  opening(b, 0, -0.9, 1.0, 0.8, 1.5, () => 1.9);
+  opening(b, 0, 1.2, 1.4, 0.45, 0.45, () => 1.9);
+}
+
 export function sheepMesh() {
   const b = new MeshBuilder();
   const wool = [0.5, 0.46, 0.39], dark = [0.1, 0.085, 0.075];
   b.blob(0, 0.68, 0, 0.36, 0.33, 0.6, 1, wool, MAT.WOOL, 0.15, 2);
-  b.box(0, 0.6, 0.64, 0.2, 0.26, 0.38, dark, MAT.PLAIN); // head (dips to graze)
-  b.box(-0.11, 0.83, 0.52, 0.06, 0.05, 0.12, dark, MAT.PLAIN); // ears
-  b.box(0.11, 0.83, 0.52, 0.06, 0.05, 0.12, dark, MAT.PLAIN);
-  for (const [lx, lz] of [[-0.18, -0.35], [0.18, -0.35], [-0.18, 0.35], [0.18, 0.35]]) b.box(lx, 0, lz, 0.09, 0.45, 0.09, dark, MAT.PLAIN);
+  b.box(0, 0.6, 0.64, 0.2, 0.26, 0.38, dark, MAT.HEAD); // head (dips to graze)
+  b.box(-0.11, 0.83, 0.52, 0.06, 0.05, 0.12, dark, MAT.HEAD); // ears
+  b.box(0.11, 0.83, 0.52, 0.06, 0.05, 0.12, dark, MAT.HEAD);
+  for (const [lx, lz] of [[-0.18, -0.35], [0.18, -0.35], [-0.18, 0.35], [0.18, 0.35]]) b.box(lx, 0, lz, 0.09, 0.45, 0.09, dark, MAT.LEG);
   return b.build();
 }
 

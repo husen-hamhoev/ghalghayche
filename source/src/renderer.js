@@ -3,7 +3,7 @@
 import * as S from './shaders.js';
 import { N, CELL, MIN, SIZE, TILES, TILE_Q } from './terrain.js';
 import { mat4mul, mat4invert, ortho, viewFromBasis, frustumPlanes, boxVisible, v3 } from './math.js';
-import { pineMesh, broadleafMesh, rockMesh, cragMesh, sheepMesh, eagleMesh } from './meshes.js';
+import { pineMesh, broadleafMesh, rockMesh, cragMesh, sheepMesh, eagleMesh, horseMesh, dogMesh, wolfMesh, turMesh, hayMesh } from './meshes.js';
 
 const HDR = 'rgba16float';
 const DEPTH = 'depth32float';
@@ -145,7 +145,10 @@ export class Renderer {
       broad: this.#mesh(broadleafMesh(0)), broadLo: this.#mesh(broadleafMesh(1)),
       rock: this.#mesh(rockMesh()), crag: this.#mesh(cragMesh()),
       sheep: this.#mesh(sheepMesh()), eagle: this.#mesh(eagleMesh()),
+      horse: this.#mesh(horseMesh().mesh), dog: this.#mesh(dogMesh().mesh), wolf: this.#mesh(wolfMesh().mesh),
+      tur: this.#mesh(turMesh().mesh), hay: this.#mesh(hayMesh()),
     };
+    this.fx = { buf: this.#buffer(world.structures.fx, GPUBufferUsage.VERTEX), count: world.structures.fxCount };
     const sets = world.scatter;
     this.sets = {};
     for (const [k, s] of Object.entries({ ...sets, crags: world.structures.crags })) {
@@ -161,28 +164,47 @@ export class Renderer {
 
   #initLightCompute() {
     const d = this.device;
+    this.aoTex = d.createTexture({ size: [N, N], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+    this.lightUbo = d.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const aoMod = d.createShaderModule({ code: wgsl(S.AO_CS) });
+    this.aoPipe = d.createComputePipeline({ layout: 'auto', compute: { module: aoMod, entryPoint: 'main' } });
     const mod = d.createShaderModule({ code: wgsl(S.LIGHT_CS) });
     this.lightPipe = d.createComputePipeline({ layout: 'auto', compute: { module: mod, entryPoint: 'main' } });
-    this.lightUbo = d.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.aoBG = d.createBindGroup({
+      layout: this.aoPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.lightUbo } },
+        { binding: 1, resource: this.heightTex.createView() },
+        { binding: 2, resource: this.aoTex.createView() },
+      ],
+    });
     this.lightBG = d.createBindGroup({
       layout: this.lightPipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.lightUbo } },
         { binding: 1, resource: this.heightTex.createView() },
         { binding: 2, resource: this.lightTex.createView() },
+        { binding: 3, resource: this.aoTex.createView() },
       ],
     });
+    this.aoDone = false;
   }
 
-  // Recompute terrain shadows and occlusion for a sun direction.
+  // Recompute terrain shadows for a key-light direction (occlusion only once).
   computeLight(sunDir) {
     const d = this.device;
     d.queue.writeBuffer(this.lightUbo, 0, new Float32Array([sunDir[0], sunDir[1], sunDir[2], 0, MIN, CELL, N, SIZE]));
     const enc = d.createCommandEncoder();
+    const groups = Math.ceil(N / 8);
+    if (!this.aoDone) {
+      const p = enc.beginComputePass();
+      p.setPipeline(this.aoPipe); p.setBindGroup(0, this.aoBG); p.dispatchWorkgroups(groups, groups); p.end();
+      this.aoDone = true;
+    }
     const pass = enc.beginComputePass();
     pass.setPipeline(this.lightPipe);
     pass.setBindGroup(0, this.lightBG);
-    pass.dispatchWorkgroups(Math.ceil(N / 8), Math.ceil(N / 8));
+    pass.dispatchWorkgroups(groups, groups);
     pass.end();
     d.queue.submit([enc.finish()]);
   }
@@ -220,7 +242,8 @@ export class Renderer {
       objects: make(S.OBJECTS, { buffers: objVB, cull: 'back' }),
       objects2: make(S.OBJECTS, { buffers: objVB, cull: 'none' }),
       birds: make(S.BIRDS, { buffers: objVB }),
-      sheep: make(S.OBJECTS, { buffers: objVB, vs: 'vs_sheep', cull: 'back' }),
+      sheep: make(S.OBJECTS, { buffers: objVB, vs: 'vs_animal', cull: 'back' }),
+      wolves: make(S.OBJECTS, { buffers: objVB, vs: 'vs_wolf', cull: 'back' }),
       grass: make(S.GRASS, {}),
       water: make(S.WATER, { buffers: [{ arrayStride: 24, attributes: [
         { shaderLocation: 0, offset: 0, format: 'float32x3' },
@@ -229,6 +252,21 @@ export class Renderer {
       ] }] }),
       sky: make(S.SKY, { depth: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'equal' } }),
     };
+    const fxMod = mod(S.FX);
+    this.fxPipe = d.createRenderPipeline({
+      layout: this.pipeLayout,
+      vertex: { module: fxMod, entryPoint: 'vs', buffers: [{ arrayStride: 32, stepMode: 'instance', attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x4' },
+        { shaderLocation: 1, offset: 16, format: 'float32x4' },
+      ] }] },
+      fragment: { module: fxMod, entryPoint: 'fs', targets: [{ format: HDR, blend: {
+        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
+      } }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'greater' },
+      multisample: { count: msaa },
+    });
     const objMod = mod(S.OBJECTS);
     this.shadowPipe = d.createRenderPipeline({
       layout: this.pipeLayout,
@@ -409,6 +447,7 @@ export class Renderer {
       this.#bindMesh(pass, this.meshes.broad); near(this.sets.broad, 40);
       this.#bindMesh(pass, this.meshes.rock); near(this.sets.rocks, 20);
       this.#bindMesh(pass, this.meshes.crag); near(this.sets.crags, 100);
+      this.#bindMesh(pass, this.meshes.hay); near(this.sets.hay, 10);
       pass.end();
     }
 
@@ -465,11 +504,22 @@ export class Renderer {
       split('broad', this.meshes.broad, this.meshes.broadLo, q.treeDist, q.treeLodDist);
       this.#bindMesh(pass, this.meshes.rock); this.#drawSet(pass, this.sets.rocks.set, this.sets.rocks.buf, vis(q.rockDist));
       this.#bindMesh(pass, this.meshes.crag); this.#drawSet(pass, this.sets.crags.set, this.sets.crags.buf, vis(1e9));
+      this.#bindMesh(pass, this.meshes.hay); this.#drawSet(pass, this.sets.hay.set, this.sets.hay.buf, vis(q.rockDist + 300));
 
       pass.setPipeline(this.pipes.sheep);
       this.#bindMesh(pass, this.meshes.sheep);
       pass.setVertexBuffer(1, this.sets.sheep.buf);
       pass.drawIndexed(this.meshes.sheep.count, this.sets.sheep.set.count);
+      for (const [mesh, key] of [['horse', 'horses'], ['dog', 'dogs'], ['tur', 'tur']]) {
+        if (!this.sets[key].set.count) continue;
+        this.#bindMesh(pass, this.meshes[mesh]);
+        pass.setVertexBuffer(1, this.sets[key].buf);
+        pass.drawIndexed(this.meshes[mesh].count, this.sets[key].set.count);
+      }
+      pass.setPipeline(this.pipes.wolves);
+      this.#bindMesh(pass, this.meshes.wolf);
+      pass.setVertexBuffer(1, this.sets.wolves.buf);
+      pass.drawIndexed(this.meshes.wolf.count, this.sets.wolves.set.count);
 
       pass.setPipeline(this.pipes.birds);
       this.#bindMesh(pass, this.meshes.eagle);
@@ -491,6 +541,11 @@ export class Renderer {
       pass.drawIndexed(this.far.count);
       pass.setPipeline(this.pipes.sky);
       pass.draw(3);
+      if (this.fx.count) {
+        pass.setPipeline(this.fxPipe);
+        pass.setVertexBuffer(0, this.fx.buf);
+        pass.draw(6, this.fx.count);
+      }
       pass.end();
     }
 

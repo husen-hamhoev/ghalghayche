@@ -9,6 +9,7 @@ const S = (v) => v * K; // design-space distance -> world
 const V = (v) => v * KV; // design-space height -> world
 import {
   MeshBuilder, battleTower, residentialTower, crypt, mosque, stoneWall,
+  archBridge, watermill, hut, litWindows, ANIMAL_SCALE,
 } from './meshes.js';
 
 const CELLS = 16; // instance culling grid
@@ -134,6 +135,36 @@ export function planWorld(t, seed = 7) {
   // watch towers
   for (const s of watch) { pad(s, 5, 5, 0.8); taken.push({ x: s.x, z: s.z, r: 8 }); }
 
+  // a shepherd's sheepfold and hut on a high meadow west of the river
+  const foldSpot = findSpot(t, rng, rx(S(250)) - S(650), S(250), S(450), { minAbove: V(280), maxAbove: V(560), flatR: 22, wRough: 2, minRiver: S(250), tries: 900 });
+  const fold = { x: foldSpot.x, z: foldSpot.z };
+  t.flatten(fold.x, fold.z, 18, 10, t.sample(fold.x, fold.z), 0.8);
+  taken.push({ x: fold.x, z: fold.z, r: 26 });
+
+  // an old stone bridge carrying a path across the river below Targim
+  const bz = S(560), bdx = RIVER.dx(bz), bl = Math.hypot(1, bdx);
+  const bridge = { x: rx(bz), z: bz, across: [1 / bl, -bdx / bl], span: RIVER.width(bz) + 16 };
+  taken.push({ x: bridge.x, z: bridge.z, r: 22 });
+
+  // watermills on the tributary and on the river near Erzi
+  const mills = [];
+  [[S(380), 1], [S(700), -1], [S(980), 1]].forEach(([dx, side]) => {
+    const x0 = TRIB.xj + dx, z0 = TRIB.z(x0), d = TRIB.dz(x0), l = Math.hypot(1, d);
+    const off = 7.5 * side;
+    // chute (local +z) points upstream: the tributary rises toward +x
+    mills.push({ x: x0 - (d / l) * off, z: z0 + (1 / l) * off, rot: Math.atan2(1, d), waterY: TRIB.bed(x0) - 0.3 });
+  });
+  [S(-1980), S(-1700)].forEach((z0) => {
+    const d = RIVER.dx(z0), l = Math.hypot(1, d), off = RIVER.width(z0) * 0.5 + 6;
+    // the river rises toward +z (south)
+    mills.push({ x: rx(z0) + (1 / l) * off, z: z0 - (d / l) * off, rot: Math.atan2(d, 1), waterY: RIVER.bed(z0) - 0.3 });
+  });
+  for (const m of mills) taken.push({ x: m.x, z: m.z, r: 12 });
+
+  // a waterfall: the steepest drop on the gorge walls, traced downhill
+  const waterfall = findWaterfall(t, rng);
+  for (let i = 0; i < waterfall.length; i += 6) taken.push({ x: waterfall[i].x, z: waterfall[i].z, r: 9 });
+
   // ---- roads and paths --------------------------------------------------------
   const road = [];
   for (let z = MIN; z <= -MIN; z += 30) {
@@ -156,9 +187,47 @@ export function planWorld(t, seed = 7) {
     paths.push({ points: pts, width });
   };
   [erzi, egikal, targim].forEach((v) => pathTo(v));
+  pathTo(fold, 3);
+  // the path over the bridge and up the far bank
+  {
+    const [ax, az] = bridge.across, h = bridge.span / 2 + 4;
+    paths.push({ points: [[bridge.x + ax * (h + 20), bridge.z + az * (h + 20)], [bridge.x + ax * h, bridge.z + az * h], [bridge.x - ax * h, bridge.z - az * h], [bridge.x - ax * (h + 160), bridge.z - az * (h + 160) + 30]], width: 3.2 });
+  }
 
   const sites = [erzi, egikal, targim];
-  return { villages: [erzi, egikal, targim, vov], watch, sites, paths, taken, vov, table, erzi, egikal, targim };
+  return { villages: [erzi, egikal, targim, vov], watch, sites, paths, taken, vov, table, erzi, egikal, targim, fold, bridge, mills, waterfall };
+}
+
+// Search the gorge walls for a long, steep drop and follow it downhill.
+function findWaterfall(t, rng) {
+  let best = null, bestDrop = 0;
+  for (let i = 0; i < 1500; i++) {
+    const z = S(-2200) + rng() * S(2600);
+    const side = rng() < 0.5 ? -1 : 1;
+    const x = RIVER.x(z) + side * (S(120) + rng() * S(420));
+    const n = t.normal(x, z, 6);
+    const above = t.sample(x, z) - RIVER.bed(z);
+    if (n[1] > 0.78 || above < V(50) || above > V(330)) continue;
+    if (Math.hypot(x - TRIB.xj, z - TRIB.z0) < 150) continue;
+    const path = traceDown(t, x, z);
+    const drop = path[0].y - path[path.length - 1].y;
+    if (drop > bestDrop && path.length > 12) { bestDrop = drop; best = path; }
+  }
+  return best || [];
+}
+function traceDown(t, x, z) {
+  const pts = [];
+  let px = x, pz = z;
+  for (let i = 0; i < 260; i++) {
+    const y = t.sample(px, pz);
+    pts.push({ x: px, z: pz, y: y + 0.5 });
+    const gx = t.sample(px + 2, pz) - t.sample(px - 2, pz), gz = t.sample(px, pz + 2) - t.sample(px, pz - 2);
+    const g = Math.hypot(gx, gz);
+    if (g < 0.2 && i > 20) break; // levelled out
+    if (Math.min(distMain(px, pz), distTrib(px, pz)) < RIVER.width(pz) * 0.5 + 2) break;
+    px -= (gx / (g || 1)) * 1.6; pz -= (gz / (g || 1)) * 1.6;
+  }
+  return pts;
 }
 
 // Build every structure into one static mesh, after the terrain is final.
@@ -167,7 +236,14 @@ export function buildStructures(t, plan, seed = 11) {
   const b = new MeshBuilder();
   const crags = [];
 
+  const fx = [];
+  const fire = (p, size, seed) => {
+    fx.push([p[0], p[1], p[2], size, 0, seed, 0, 0]);
+    fx.push([p[0], p[1] + size * 0.35, p[2], size * 5, 1, seed, 0, 0]);
+  };
+
   for (const v of plan.villages) {
+    litWindows(v === plan.erzi); // Erzi is lived in: warm windows after dark
     for (const s of v.buildings) {
       const y = t.sample(s.x, s.z);
       const rot = facing(s.x, s.z, RIVER.x(s.z), s.z) + (rng() - 0.5) * 0.5;
@@ -179,8 +255,43 @@ export function buildStructures(t, plan, seed = 11) {
       }
     }
   }
+  litWindows(false);
+  // signal towers along the gorge, each with a fire ready on its roof
   for (const s of plan.watch) {
-    battleTower(b, s.x, t.sample(s.x, s.z), s.z, rng() * 6, rng, { height: 24 + rng() * 4 });
+    const r = battleTower(b, s.x, t.sample(s.x, s.z), s.z, rng() * 6, rng, { height: 24 + rng() * 4, beacon: true });
+    fire(r.fire, 2.2, rng());
+  }
+
+  // the stone bridge
+  {
+    const br = plan.bridge, [ax, az] = br.across, h = br.span / 2;
+    const gA = t.sample(br.x - ax * h, br.z - az * h), gB = t.sample(br.x + ax * h, br.z + az * h);
+    archBridge(b, br.x, br.z, Math.atan2(ax, az), br.span, RIVER.bed(br.z), gA, gB, rng);
+  }
+  // watermills
+  for (const m of plan.mills) watermill(b, m.x, t.sample(m.x, m.z), m.z, m.rot, rng, m.waterY);
+
+  // the sheepfold: a ring of dry-stone wall, the shepherd's hut and a fire
+  {
+    const f = plan.fold, R = 14;
+    for (let k = 0; k < 14; k++) {
+      if (k === 3) continue; // the gate
+      const a0 = (k / 14) * Math.PI * 2, a1 = ((k + 1) / 14) * Math.PI * 2;
+      stoneWall(b, t, f.x + Math.cos(a0) * R, f.z + Math.sin(a0) * R, f.x + Math.cos(a1) * R, f.z + Math.sin(a1) * R, rng, 0.3);
+    }
+    const hx = f.x + 21, hz = f.z + 4;
+    litWindows(true);
+    hut(b, hx, t.sample(hx, hz), hz, Math.PI / 2 + 0.2, rng);
+    litWindows(false);
+    const cx = f.x + 18, cz = f.z + 9;
+    fire([cx, t.sample(cx, cz) + 0.1, cz], 1.1, 0.37);
+  }
+
+  // spray where the waterfall lands
+  const wf = plan.waterfall;
+  if (wf.length) {
+    const end = wf[wf.length - 1];
+    for (let k = 0; k < 4; k++) fx.push([end.x + (rng() - 0.5) * 8, end.y + 2 + k * 3, end.z + (rng() - 0.5) * 8, 10 + k * 3, 2, rng(), 0, 0]);
   }
 
   // Vovnushki: two towers on rock pillars rising from the canyon floor, a
@@ -220,7 +331,7 @@ export function buildStructures(t, plan, seed = 11) {
       stoneWall(b, t, x, z, vil.x + Math.cos(ang2) * r, vil.z + Math.sin(ang2) * r, rng, 0.0);
     }
   }
-  return { mesh: b.build(), crags: packInstances(crags, false) };
+  return { mesh: b.build(), crags: packInstances(crags, false), fx: new Float32Array(fx.flat()), fxCount: fx.length };
 }
 
 // ---- instances ----------------------------------------------------------------------
@@ -296,24 +407,73 @@ export function scatter(t, plan, density = 1, seed = 23) {
     let sc = 0.4 + Math.pow(rng(), 3) * 3.5;
     if (rng() < 0.03) sc = 5 + rng() * 5;
     const tilt = rng() * 6.283;
-    rocks.push([x, y - sc * 0.25, z, tilt, sc, sc * (0.6 + rng() * 0.5), rng(), 1]);
+    // seat boulders by the lowest ground under them, so none hang over a slope
+    let low = y;
+    for (let k = 0; k < 8; k++) low = Math.min(low, t.sample(x + Math.cos(k * 0.785) * sc * 0.85, z + Math.sin(k * 0.785) * sc * 0.85));
+    rocks.push([x, Math.min(y - sc * 0.25, low + sc * 0.1), z, tilt, sc, sc * (0.6 + rng() * 0.5), rng(), 1]);
   }
 
-  // flocks grazing the meadows near villages (they wander in the shader)
+  // haystacks on the terraced fields
+  const hay = [];
+  for (const v of [plan.erzi, plan.egikal, plan.targim]) {
+    for (let i = 0, n = 0; i < 600 && n < 16; i++) {
+      const a = rng() * 6.283, r = Math.sqrt(rng()) * v.fieldR;
+      const x = v.x + Math.cos(a) * r, z = v.z + Math.sin(a) * r;
+      if (splat(x, z)[1] < 0.35 || t.normal(x, z)[1] < 0.93 || near(x, z, 7)) continue;
+      const sc = 0.8 + rng() * 0.35;
+      hay.push([x, t.sample(x, z) - 0.2, z, rng() * 6.283, sc, sc * (0.9 + rng() * 0.2), rng(), 0]);
+      n++;
+    }
+  }
+
+  // grazing animals: [x, y, z, rot, scale xz, scale y, seed, how far it wanders]
+  const animal = (list, kind, x, z, wander, size = 1) => {
+    const [sx, sy] = ANIMAL_SCALE[kind];
+    const k = size * (0.9 + rng() * 0.2);
+    list.push([x, t.sample(x, z), z, 0, sx * k, sy * k, rng(), wander]);
+  };
+  const horses = [], dogs = [], tur = [], wolves = [];
+
+  // flocks grazing the meadows near villages and at the sheepfold, each with a dog
   const flocks = [];
-  for (const v of [plan.erzi, plan.erzi, plan.egikal, plan.targim]) {
-    const c = findSpot(t, rng, v.x, v.z, v.fieldR * 1.8, { flatR: 25, wRough: 1, minRiver: S(50), tries: 300 });
+  const foldSpot = { x: plan.fold.x + 40, z: plan.fold.z - 30, h: t.sample(plan.fold.x + 40, plan.fold.z - 30) };
+  for (const v of [plan.erzi, plan.erzi, plan.egikal, plan.targim, null]) {
+    const c = v ? findSpot(t, rng, v.x, v.z, v.fieldR * 1.8, { flatR: 25, wRough: 1, minRiver: S(50), tries: 300 }) : foldSpot;
     if (!c) continue;
+    animal(dogs, 'dog', c.x + 8, c.z - 6, 2.2);
     const n = 26 + Math.floor(rng() * 14);
     for (let i = 0; i < n; i++) {
       const a = rng() * 6.283, r = Math.sqrt(rng()) * 22;
       const x = c.x + Math.cos(a) * r, z = c.z + Math.sin(a) * r;
       if (near(x, z, 4)) continue;
-      sheep.push([x, t.sample(x, z), z, rng() * 6.283, 0.9 + rng() * 0.2, 0.9 + rng() * 0.2, rng(), 0]);
+      sheep.push([x, t.sample(x, z), z, rng() * 6.283, 0.9 + rng() * 0.2, 0.9 + rng() * 0.2, rng(), 1]);
     }
     flocks.push(c);
   }
   plan.flocks = flocks;
+
+  // horses near Erzi and Targim
+  for (const v of [plan.erzi, plan.targim]) {
+    const c = findSpot(t, rng, v.x + 120, v.z - 80, v.fieldR * 2, { flatR: 25, wRough: 1, minRiver: S(50), tries: 300 });
+    for (let i = 0; i < 6; i++) animal(horses, 'horse', c.x + (rng() - 0.5) * 40, c.z + (rng() - 0.5) * 40, 1.4);
+  }
+
+  // tur on the cliffs and ledges, high above the gorge
+  for (let g = 0, tries = 0; g < 5 && tries < 4000; tries++) {
+    const x = MIN + 200 + rng() * (SIZE - 400), z = MIN + 200 + rng() * (SIZE - 400);
+    const n = t.normal(x, z), y = t.sample(x, z);
+    if (n[1] < 0.5 || n[1] > 0.78 || y < 1000 + V(650) || nearVillage(x, z, 3)) continue;
+    for (let i = 0; i < 4; i++) animal(tur, 'tur', x + (rng() - 0.5) * 18, z + (rng() - 0.5) * 18, 0.25);
+    g++;
+  }
+
+  // a wolf pack trotting a wide loop over the high meadows by the sheepfold
+  {
+    const cx = plan.fold.x - 230, cz = plan.fold.z + 60, R = 150;
+    const [sx, sy] = ANIMAL_SCALE.wolf;
+    for (let i = 0; i < 5; i++) wolves.push([cx, 0, cz, i, sx * (0.95 + rng() * 0.12), sy * (0.95 + rng() * 0.12), rng(), R]);
+    plan.wolves = { x: cx, z: cz, R };
+  }
 
   // eagles: pairs over each tower village, and more soaring along the gorge
   const birds = [];
@@ -328,16 +488,24 @@ export function scatter(t, plan, density = 1, seed = 23) {
     const z = MIN + 300 + rng() * (SIZE - 600);
     bird(RIVER.x(z) + (rng() - 0.5) * 600, z, 70 + rng() * 200, 50 + rng() * 90);
   }
+  // bearded vultures soaring wide and high along the cliffs (size in the last slot)
+  for (let i = 0; i < 4; i++) {
+    const z = MIN + 500 + rng() * (SIZE - 1000);
+    bird(RIVER.x(z) + (rng() - 0.5) * 800, z, 220 + rng() * 200, 140 + rng() * 120);
+    birds[birds.length - 1][7] = 2.9;
+  }
 
   return {
     pines: new InstanceSet(pines), broad: new InstanceSet(broad), rocks: new InstanceSet(rocks),
     sheep: new InstanceSet(sheep, false), birds: new InstanceSet(birds, false),
+    hay: new InstanceSet(hay), horses: new InstanceSet(horses, false), dogs: new InstanceSet(dogs, false),
+    tur: new InstanceSet(tur, false), wolves: new InstanceSet(wolves, false),
   };
 }
 
 // ---- rivers -----------------------------------------------------------------------
 
-export function buildWater() {
+export function buildWater(waterfall = []) {
   const verts = [], idx = [];
   const ribbon = (pts) => {
     const base = verts.length / 6;
@@ -361,6 +529,7 @@ export function buildWater() {
   const trib = [];
   for (let x = TRIB.xj; x <= -MIN; x += 3) trib.push({ x, z: TRIB.z(x), y: TRIB.bed(x) - 0.2, w: S(12) });
   ribbon(trib);
+  if (waterfall.length > 2) ribbon(waterfall.map((p, i) => ({ x: p.x, z: p.z, y: p.y + 0.3, w: 3.2 + Math.min(i, 40) * 0.07 })));
   return { vertices: new Float32Array(verts), indices: new Uint32Array(idx) };
 }
 

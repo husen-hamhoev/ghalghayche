@@ -1,11 +1,12 @@
 // Generative soundscape of nature only, synthesised live with the Web Audio
-// API: mountain wind, the river, birdsong, a circling eagle and grazing sheep.
+// API: mountain wind, the river and a waterfall, birdsong, a circling eagle,
+// grazing sheep, a crackling campfire, and wolves howling at night.
 
 export class Soundscape {
   constructor() {
     this.ctx = null;
     this.enabled = true;
-    this.timers = { eagle: 12, bird: 3, bleat: 2 };
+    this.timers = { eagle: 12, bird: 3, bleat: 2, howl: 8, crackle: 0.5 };
   }
 
   start() {
@@ -33,6 +34,8 @@ export class Soundscape {
     // river: low rumble plus bright babble
     this.riverLo = this.#noiseVoice(noise, 'lowpass', 700, 0.5);
     this.riverHi = this.#noiseVoice(noise, 'bandpass', 2600, 0.9);
+    this.fall = this.#noiseVoice(noise, 'bandpass', 700, 0.4);
+    this.fallHi = this.#noiseVoice(noise, 'highpass', 3000, 0.7);
     this.gust = 0.5; this.gustTarget = 0.5; this.t = 0;
   }
 
@@ -133,6 +136,52 @@ export class Soundscape {
     o.start(t0); vib.start(t0); o.stop(t); vib.stop(t);
   }
 
+  // A wolf's howl: a rising, wavering note that falls away; often answered.
+  #howl(level) {
+    const ctx = this.ctx;
+    const voices = 1 + Math.floor(Math.random() * 3);
+    for (let v = 0; v < voices; v++) {
+      const t0 = ctx.currentTime + v * (0.6 + Math.random() * 1.2);
+      const dur = 2.6 + Math.random() * 1.6;
+      const base = 330 + Math.random() * 140 + v * 40;
+      const pan = this.#pan(Math.random() * 1.6 - 0.8);
+      const out = ctx.createGain(); out.gain.value = 0;
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500;
+      out.connect(lp).connect(pan); pan.connect(this.master); pan.connect(this.reverb);
+      const o = ctx.createOscillator(); o.type = 'triangle';
+      const vib = ctx.createOscillator(); vib.frequency.value = 4.5 + Math.random() * 2;
+      const vg = ctx.createGain(); vg.gain.value = 0;
+      vib.connect(vg).connect(o.frequency);
+      o.connect(out);
+      o.frequency.setValueAtTime(base * 0.75, t0);
+      o.frequency.exponentialRampToValueAtTime(base * 1.25, t0 + 0.7);
+      o.frequency.setValueAtTime(base * 1.25, t0 + dur * 0.55);
+      o.frequency.exponentialRampToValueAtTime(base * 0.7, t0 + dur);
+      vg.gain.setValueAtTime(0, t0);
+      vg.gain.linearRampToValueAtTime(base * 0.02, t0 + 1.0);
+      const peak = 0.07 * level;
+      out.gain.setValueAtTime(0, t0);
+      out.gain.linearRampToValueAtTime(peak, t0 + 0.5);
+      out.gain.setValueAtTime(peak * 0.9, t0 + dur * 0.7);
+      out.gain.linearRampToValueAtTime(0, t0 + dur);
+      o.start(t0); vib.start(t0); o.stop(t0 + dur + 0.1); vib.stop(t0 + dur + 0.1);
+    }
+  }
+
+  // Campfire: short dry crackles.
+  #crackle(level) {
+    const ctx = this.ctx, t0 = ctx.currentTime;
+    const len = Math.floor(ctx.sampleRate * 0.02);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1500 + Math.random() * 2500;
+    const g = ctx.createGain(); g.gain.value = 0.25 * level * (0.4 + Math.random());
+    src.connect(hp).connect(g).connect(this.master);
+    src.start(t0);
+  }
+
   // A sheep's bleat: a buzzy voice with a fast flutter through two formants.
   #bleat(level) {
     const ctx = this.ctx, t0 = ctx.currentTime;
@@ -181,10 +230,23 @@ export class Soundscape {
     const riverLvl = 0.5 / (1 + (r / 45) ** 2) + 0.03 / (1 + (r / 400) ** 2);
     this.riverLo.g.gain.setTargetAtTime(riverLvl, now, 0.3);
     this.riverHi.g.gain.setTargetAtTime(riverLvl * 0.35, now, 0.3);
+    const fallLvl = 0.45 / (1 + ((env.waterfallDist ?? 1e9) / 70) ** 2);
+    this.fall.g.gain.setTargetAtTime(fallLvl, now, 0.3);
+    this.fallHi.g.gain.setTargetAtTime(fallLvl * 0.25, now, 0.3);
 
     this.birdLevel = Math.max(0, 1 - env.aboveGround / 250) * (0.3 + 0.7 * env.forest) * (1 - high * 0.8);
     const tm = this.timers;
-    tm.bird -= dt; tm.eagle -= dt; tm.bleat -= dt;
+    tm.bird -= dt; tm.eagle -= dt; tm.bleat -= dt; tm.howl -= dt; tm.crackle -= dt;
+    const night = env.night ?? 0;
+    if (tm.howl < 0) {
+      tm.howl = 25 + Math.random() * 40;
+      if (night > 0.5) this.#howl(Math.min(1, 0.25 + 1 / (1 + ((env.wolfDist ?? 1e9) / 500) ** 2)));
+    }
+    if (tm.crackle < 0) {
+      tm.crackle = 0.05 + Math.random() * 0.35;
+      const lvl = night / (1 + ((env.fireDist ?? 1e9) / 14) ** 2);
+      if (lvl > 0.02) this.#crackle(lvl);
+    }
     if (tm.bird < 0) { tm.bird = 1.5 + Math.random() * 5; if (this.birdLevel > 0.05) this.#chirp(); }
     if (tm.eagle < 0) { tm.eagle = 25 + Math.random() * 35; this.#eagle(); }
     if (tm.bleat < 0) {
