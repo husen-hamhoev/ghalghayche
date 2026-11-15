@@ -53,9 +53,11 @@ On phones and tablets there are on-screen controls: the left stick flies, â–² â–
 
 ## Detail levels
 
-Low, Medium and High change render resolution, anti-aliasing, shadow resolution, grass density, tree density and draw distance. The level is guessed on first visit and remembered afterwards. If the frame rate stays low, the scene first lowers its resolution, then drops a detail level.
+Low, Medium and High change render resolution, anti-aliasing, shadows, shader detail, grass, tree density and draw distance.
 
-URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|morning|noon|golden|evening` set the time of day, `?q=low|medium|high` force a detail level, `?stats` show stats, `?auto` skip the title screen, `?cam=x,y,z,yawDeg,pitchDeg` place the camera.
+**Auto** (the default) adapts in both directions while you fly. Phones and tablets start on Low, desktops on Medium or High. If the frame rate stays low, the scene lowers its resolution, then drops a level. If it runs smoothly at 60 fps for a few seconds, it tries the next level up and keeps it only if it still holds about 60 fps. A level that proved too heavy isn't retried in that session. Picking Low, Medium or High in the menu pins that level instead.
+
+URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|morning|noon|golden|evening` set the time of day, `?q=low|medium|high` pin a detail level, `?stats` show stats, `?auto` skip the title screen, `?cam=x,y,z,yawDeg,pitchDeg` place the camera.
 
 ## How it works
 

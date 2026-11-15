@@ -239,7 +239,20 @@ async function main() {
     renderer.setQuality(quality);
     renderer.density = quality.density;
     auto.scale = 1;
+    refreshDetailMenu();
   };
+  // Detail menu: Auto (adapts both ways) or a pinned level.
+  const refreshDetailMenu = () => buildChoice(
+    $('quality'),
+    [{ id: 'auto', label: `Auto (${PRESETS[settings.quality].label})` }, ...ORDER.map((id) => ({ id, label: PRESETS[id].label }))],
+    settings.auto ? 'auto' : settings.quality,
+    (id) => {
+      if (id === 'auto') { settings.auto = true; auto.raise = true; saveSettings(settings); refreshDetailMenu(); return; }
+      settings.auto = false;
+      auto.raise = false;
+      applyQuality(id);
+    },
+  );
   const applyTime = (id) => {
     settings.time = id; saveSettings(settings);
     env = environment(TIMES.find((t) => t.id === id));
@@ -250,7 +263,6 @@ async function main() {
     audio.setEnabled(on);
     $('sound').textContent = on ? 'Sound: on' : 'Sound: off';
   };
-  buildChoice($('quality'), ORDER.map((id) => ({ id, label: PRESETS[id].label })), settings.quality, applyQuality);
   buildChoice($('time'), TIMES, settings.time, applyTime);
   $('sound').onclick = () => setSound(!settings.sound);
   $('sound').textContent = settings.sound ? 'Sound: on' : 'Sound: off';
@@ -280,11 +292,9 @@ async function main() {
     captionTimer = 5.5;
   }
 
-  const auto = new AutoQuality(() => {
-    const i = ORDER.indexOf(settings.quality);
-    if (i > 0) { applyQuality(ORDER[i - 1]); buildChoice($('quality'), ORDER.map((id) => ({ id, label: PRESETS[id].label })), settings.quality, applyQuality); }
-    else auto.enabled = false;
-  });
+  const auto = new AutoQuality({ getLevel: () => settings.quality, setLevel: (id) => applyQuality(id) });
+  auto.raise = settings.auto;
+  refreshDetailMenu();
 
   const begin = () => {
     if (started) return;
@@ -352,7 +362,7 @@ async function main() {
       fps = frames / fpsT; frames = 0; fpsT = 0;
       if (!$('stats').hidden) {
         $('stats').textContent =
-          `${fps.toFixed(0)} fps · ${(1000 / fps).toFixed(1)} ms\n${w}×${h} · ${quality.label} · scale ${auto.scale.toFixed(2)}\n` +
+          `${fps.toFixed(0)} fps · ${(1000 / fps).toFixed(1)} ms\n${w}×${h} · ${quality.label}${settings.auto ? ' (auto)' : ''} · scale ${auto.scale.toFixed(2)}\n` +
           `draws ${renderer.stats.draws} · instances ${renderer.stats.instances}\n` +
           `x ${cam.pos[0].toFixed(0)} z ${cam.pos[2].toFixed(0)} · ${cam.pos[1].toFixed(0)} m`;
       }
