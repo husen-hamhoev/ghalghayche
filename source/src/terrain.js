@@ -129,7 +129,9 @@ export class Terrain {
     const bedT = x < T0.xj ? R0.bed(T0.z0) : T0.bed(x);
     const hTrib = bedT + 3 * smoothstep(6, 30, dt) + M * profT;
 
-    let h = smin(hMain, hTrib, 50);
+    // the tributary only shapes its own canyon: far from it, its valley floor
+    // (fixed at the junction's height) must not dig into the main valley
+    let h = lerp(smin(hMain, hTrib, 50), hMain, smoothstep(520, 820, dt));
     const floorK = Math.min(tm, tt);
     h += fbm(nE, x / 160, z / 160, 3) * 9 * smoothstep(0.0, 0.25, floorK);
     h += fbm(nE, x / 45 + 3.3, z / 45, 2) * 1.5 * smoothstep(0.0, 0.1, floorK);

@@ -152,12 +152,12 @@ export function planWorld(t, seed = 7) {
     const x0 = TRIB.xj + dx, z0 = TRIB.z(x0), d = TRIB.dz(x0), l = Math.hypot(1, d);
     const off = 7.5 * side;
     // chute (local +z) points upstream: the tributary rises toward +x
-    mills.push({ x: x0 - (d / l) * off, z: z0 + (1 / l) * off, rot: Math.atan2(1, d), waterY: TRIB.bed(x0) - 0.3 });
+    mills.push({ x: x0 - (d / l) * off, z: z0 + (1 / l) * off, rot: Math.atan2(1, d), onTrib: true });
   });
   [S(-1980), S(-1700)].forEach((z0) => {
     const d = RIVER.dx(z0), l = Math.hypot(1, d), off = RIVER.width(z0) * 0.5 + 6;
     // the river rises toward +z (south)
-    mills.push({ x: rx(z0) + (1 / l) * off, z: z0 - (d / l) * off, rot: Math.atan2(d, 1), waterY: RIVER.bed(z0) - 0.3 });
+    mills.push({ x: rx(z0) + (1 / l) * off, z: z0 - (d / l) * off, rot: Math.atan2(d, 1), onTrib: false });
   });
   for (const m of mills) taken.push({ x: m.x, z: m.z, r: 12 });
 
@@ -231,7 +231,7 @@ function traceDown(t, x, z) {
 }
 
 // Build every structure into one static mesh, after the terrain is final.
-export function buildStructures(t, plan, seed = 11) {
+export function buildStructures(t, plan, surf, seed = 11) {
   const rng = mulberry32(seed);
   const b = new MeshBuilder();
   const crags = [];
@@ -266,10 +266,10 @@ export function buildStructures(t, plan, seed = 11) {
   {
     const br = plan.bridge, [ax, az] = br.across, h = br.span / 2;
     const gA = t.sample(br.x - ax * h, br.z - az * h), gB = t.sample(br.x + ax * h, br.z + az * h);
-    archBridge(b, br.x, br.z, Math.atan2(ax, az), br.span, RIVER.bed(br.z), gA, gB, rng);
+    archBridge(b, br.x, br.z, Math.atan2(ax, az), br.span, surf.mainAt(br.z), gA, gB, rng);
   }
   // watermills
-  for (const m of plan.mills) watermill(b, m.x, t.sample(m.x, m.z), m.z, m.rot, rng, m.waterY);
+  for (const m of plan.mills) watermill(b, m.x, t.sample(m.x, m.z), m.z, m.rot, rng, m.onTrib ? surf.tribAt(m.x) : surf.mainAt(m.z));
 
   // the sheepfold: a ring of dry-stone wall, the shepherd's hut and a fire
   {
@@ -505,9 +505,50 @@ export function scatter(t, plan, density = 1, seed = 23) {
 
 // ---- rivers -----------------------------------------------------------------------
 
-export function buildWater(waterfall = []) {
+// Water surfaces taken from the finished terrain: at each cross-section the
+// water sits just above the lowest ground in the channel, and never rises as
+// it flows on. (The river formulas alone can disagree with the terrain where
+// valleys meet.) Returned heights are also used by the bridge and the mills.
+export function riverSurfaces(t) {
+  const section = (x, z, nx, nz, r) => {
+    let low = 1e9;
+    for (let k = -4; k <= 4; k++) low = Math.min(low, t.sample(x + nx * r * k / 4, z + nz * r * k / 4));
+    return low + 0.45;
+  };
+  const mainZ = [], mainY = [];
+  for (let z = MIN; z <= -MIN; z += 4) {
+    const d = RIVER.dx(z), l = Math.hypot(1, d);
+    mainZ.push(z);
+    mainY.push(section(RIVER.x(z), z, 1 / l, -d / l, RIVER.width(z) * 0.35));
+  }
+  for (let i = mainY.length - 2; i >= 0; i--) mainY[i] = Math.min(mainY[i], mainY[i + 1]); // flows north (-z)
+  const tribX = [], tribY = [];
+  for (let x = TRIB.xj; x <= -MIN; x += 3) {
+    const d = TRIB.dz(x), l = Math.hypot(1, d);
+    tribX.push(x);
+    tribY.push(section(x, TRIB.z(x), -d / l, 1 / l, TRIB.width() * 1.2));
+  }
+  for (let i = tribY.length - 2; i >= 0; i--) tribY[i] = Math.min(tribY[i], tribY[i + 1]); // flows west
+  const at = (xs, ys, v) => {
+    const f = clamp((v - xs[0]) / (xs[1] - xs[0]), 0, xs.length - 1.001);
+    const i = Math.floor(f);
+    return lerp(ys[i], ys[i + 1], f - i);
+  };
+  return { mainZ, mainY, tribX, tribY, mainAt: (z) => at(mainZ, mainY, z), tribAt: (x) => at(tribX, tribY, x) };
+}
+
+export function buildWater(t, surf, waterfall = []) {
   const verts = [], idx = [];
-  const ribbon = (pts) => {
+  // how far the water reaches to one side before the bank rises above it
+  const reach = (x, z, nx, nz, y, r0, rMax) => {
+    for (let r = r0; r <= rMax; r += 1) {
+      const h = t.sample(x + nx * r, z + nz * r);
+      if (h > y + 0.12) return r + 0.8; // bank rises: tuck the edge under it
+      if (h < y - 0.25) return Math.max(0.3, r - 1); // ground falls away: stop short
+    }
+    return rMax;
+  };
+  const ribbon = (pts, fit) => {
     const base = verts.length / 6;
     let dist = 0;
     for (let i = 0; i < pts.length; i++) {
@@ -518,19 +559,23 @@ export function buildWater(waterfall = []) {
       if (i > 0) dist += Math.hypot(p.x - pts[i - 1].x, p.z - pts[i - 1].z);
       const slope = Math.abs(q.y - r.y) / (Math.hypot(q.x - r.x, q.z - r.z) || 1);
       const flow = clamp((slope - 0.04) * 10, 0, 1);
-      verts.push(p.x - nx * p.w, p.y, p.z - nz * p.w, 0, dist, flow);
-      verts.push(p.x + nx * p.w, p.y, p.z + nz * p.w, 1, dist, flow);
+      const wl = fit ? reach(p.x, p.z, -nx, -nz, p.y, 0.5, p.w) : p.w;
+      const wr = fit ? reach(p.x, p.z, nx, nz, p.y, 0.5, p.w) : p.w;
+      // a waterfall hugs the slope under each edge; rivers stay level across
+      const yl = fit ? p.y : t.sample(p.x - nx * wl, p.z - nz * wl) + 0.35;
+      const yr = fit ? p.y : t.sample(p.x + nx * wr, p.z + nz * wr) + 0.35;
+      verts.push(p.x - nx * wl, yl, p.z - nz * wl, 0, dist, flow);
+      verts.push(p.x + nx * wr, yr, p.z + nz * wr, 1, dist, flow);
       if (i > 0) { const a = base + (i - 1) * 2; idx.push(a, a + 1, a + 3, a, a + 3, a + 2); }
     }
   };
-  const main = [];
-  for (let z = MIN; z <= -MIN; z += 4) main.push({ x: RIVER.x(z), z, y: RIVER.bed(z) - 0.3, w: RIVER.width(z) * 0.5 + S(8) });
-  ribbon(main);
-  const trib = [];
-  for (let x = TRIB.xj; x <= -MIN; x += 3) trib.push({ x, z: TRIB.z(x), y: TRIB.bed(x) - 0.2, w: S(12) });
-  ribbon(trib);
-  if (waterfall.length > 2) ribbon(waterfall.map((p, i) => ({ x: p.x, z: p.z, y: p.y + 0.3, w: 3.2 + Math.min(i, 40) * 0.07 })));
-  return { vertices: new Float32Array(verts), indices: new Uint32Array(idx) };
+  const counts = [];
+  ribbon(surf.mainZ.map((z, i) => ({ x: RIVER.x(z), z, y: surf.mainY[i], w: RIVER.width(z) * 0.5 + S(8) })), true);
+  counts.push(verts.length / 6);
+  ribbon(surf.tribX.map((x, i) => ({ x, z: TRIB.z(x), y: surf.tribY[i], w: S(12) })), true);
+  counts.push(verts.length / 6);
+  if (waterfall.length > 2) ribbon(waterfall.map((p, i) => ({ x: p.x, z: p.z, y: p.y + 0.3, w: 3.2 + Math.min(i, 40) * 0.07 })), false);
+  return { vertices: new Float32Array(verts), indices: new Uint32Array(idx), counts };
 }
 
 // ---- viewpoints -------------------------------------------------------------------

@@ -1,7 +1,7 @@
 // Entry point: builds the world, runs the camera, menu and frame loop.
 
 import { Terrain, RIVER, TRIB, MIN, N, CELL, distMain, distTrib } from './terrain.js';
-import { planWorld, buildStructures, scatter, buildWater, makeViewpoints } from './world.js';
+import { planWorld, buildStructures, scatter, buildWater, makeViewpoints, riverSurfaces } from './world.js';
 import { Renderer } from './renderer.js';
 import { Soundscape } from './audio.js';
 import { PRESETS, ORDER, loadSettings, saveSettings, AutoQuality } from './quality.js';
@@ -46,10 +46,11 @@ async function main() {
   terrain.finalize(plan.sites, plan.paths);
   setProgress(0.75, 'Planting forests');
   await tick();
-  const structures = buildStructures(terrain, plan);
+  const surf = riverSurfaces(terrain);
+  const structures = buildStructures(terrain, plan, surf);
   const viewpoints = makeViewpoints(terrain, plan);
   const sets = scatter(terrain, plan, 1);
-  const water = buildWater(plan.waterfall);
+  const water = buildWater(terrain, surf, plan.waterfall);
   setProgress(0.88, 'Lighting the gorge');
   await tick();
 
