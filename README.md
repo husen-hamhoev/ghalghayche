@@ -28,6 +28,8 @@ Download `index.html` and open it in a browser with WebGPU: a recent Chrome or E
 - Animals: sheep and horses grazing with shepherd dogs, East Caucasian tur on the cliffs, a wolf pack trotting the high meadows, eagles circling over the villages and bearded vultures soaring along the ridges
 - **Animals** setting (Few, Normal, Many, Lots): Lots has about four times as many: more flocks with their dogs, horse herds, tur groups, wolf packs, eagles, vultures and bats
 - Mist that drifts through the gorge in banks, heaviest at night and dawn
+- **Morning valley fog**: at dawn a sea of fog fills the gorge, with the villages and towers rising out of it, and burns off as the sun climbs (also in the Day & night cycle)
+- **Avalanches**: now and then, on a slope that is under snow in the current season and in view, an avalanche breaks loose and runs down in a billowing cloud of powder; its deep rumble arrives late when it is far away, as sound would
 - Fireflies over the meadows on warm nights, bats around the villages after dusk, butterflies by day, alpine flowers, and patches of Caucasian rhododendron with pale yellow blossoms on the high slopes
 - **Seasons**: spring, summer, autumn (golden birches, straw-coloured meadows) and winter (snow down to the river, bare trees, a frozen lake)
 - **Weather**: clear, rain, or changing, where clouds gather on the peaks, it rains (snows in winter) and clears again, with lightning and thunder in heavy rain and a rainbow when the sun comes out behind you
@@ -80,7 +82,7 @@ Low, Medium and High change render resolution, shadows, shader detail, grass, tr
 
 **Auto** (the default) adapts in both directions while you fly. Phones and tablets start on Low, desktops on Medium or High. If the frame rate stays low, the scene lowers its resolution, then drops a level. If it runs smoothly at 60 fps for a few seconds, it tries the next level up and keeps it only if it still holds about 60 fps. A level that proved too heavy isn't retried in that session. Picking Low, Medium or High in the menu pins that level instead.
 
-URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|morning|noon|golden|evening|cycle` (with `&hour=` for the cycle), `?season=spring|summer|autumn|winter`, `?weather=clear|changing|rain`, `?animals=few|normal|many|lots` set the time of day, `?q=low|medium|high` pin a detail level, `?stats` show stats, `?auto` skip the title screen, `?cam=x,y,z,yawDeg,pitchDeg` place the camera.
+URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|morning|noon|golden|evening|cycle` (with `&hour=` for the cycle), `?season=spring|summer|autumn|winter`, `?weather=clear|changing|rain`, `?animals=few|normal|many|lots` set the time of day, `?q=low|medium|high` pin a detail level, `?stats` show stats, `?auto` skip the title screen, `?cam=x,y,z,yawDeg,pitchDeg` place the camera, `?avalanche` set off an avalanche right away, `?milkyway` preview the Milky Way in the night sky.
 
 ## How it works
 

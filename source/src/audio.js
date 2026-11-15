@@ -28,7 +28,7 @@ export class Soundscape {
     this.wet = ctx.createGain(); this.wet.gain.value = 0.55;
     this.reverb.connect(this.wet).connect(this.master);
 
-    const noise = this.#noiseBuffer(6);
+    const noise = (this.noise = this.#noiseBuffer(6));
 
     // wind: two band-passed noise layers with slow gusts
     this.wind = this.#noiseVoice(noise, 'bandpass', 420, 0.6);
@@ -221,6 +221,33 @@ export class Soundscape {
     const g = ctx.createGain(); g.gain.value = 0.9 * level;
     src.connect(lp).connect(g); g.connect(this.master); g.connect(this.reverb);
     src.start(t0);
+  }
+
+  // A distant avalanche: a long, deep rumble that swells while the snow runs
+  // and dies away, with a soft hiss of powder when it is near. `delay` lets
+  // the sound arrive after the sight, as it does across a valley.
+  avalanche(delay, level, pan, run) {
+    if (!this.ctx || this.ctx.state !== 'running') return;
+    const ctx = this.ctx, t0 = ctx.currentTime + delay, end = t0 + run + 7;
+    const voice = (type, freq, q, peak) => {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noise; src.loop = true;
+      src.playbackRate.value = 0.8 + Math.random() * 0.2;
+      const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(peak * 0.6, t0 + 1.2);
+      g.gain.linearRampToValueAtTime(peak, t0 + run * 0.7);
+      g.gain.setTargetAtTime(0, t0 + run, 2.0);
+      const pn = this.#pan(pan * 0.8);
+      src.connect(f).connect(g).connect(pn);
+      pn.connect(this.master);
+      pn.connect(this.reverb);
+      src.start(t0, Math.random() * 5); src.stop(end);
+    };
+    voice('lowpass', 150, 0.7, 1.6 * level);
+    voice('bandpass', 420, 0.6, 0.35 * level);
+    if (level > 0.6) voice('highpass', 1600, 0.5, 0.12 * (level - 0.6));
   }
 
   // Campfire: short dry crackles.

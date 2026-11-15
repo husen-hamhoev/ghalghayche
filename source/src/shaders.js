@@ -23,6 +23,9 @@ struct U {
   season: vec4f,    // autumn, winter, spring (0..1 each; all 0 = summer), unused
   weather: vec4f,   // rain, cloud on the peaks, lightning flash, rainbow
   extra: vec4f,     // clip height, clip on (reflection pass), lightning azimuth, lake reflection ready
+  extra2: vec4f,    // valley fog (0..1), Milky Way (preview), unused, unused
+  aval: vec4f,      // avalanche track: start x, z, end x, z
+  aval2: vec4f,     // avalanche: seconds since release, run time, on, seed
 };
 @group(0) @binding(0) var<uniform> u: U;
 // Set only for the lake's reflection pass: drop what lies below the water.
@@ -156,13 +159,50 @@ fn fogAmount(wp: vec3f) -> f32 {
   return clamp(1.0 - exp(-max(amt + mist, 0.0)), 0.0, 1.0);
 }
 
+// Morning valley fog: a dense layer with a flat, gently waving top that
+// fills the gorge. Its top follows the valley floor as it rises southward
+// (x/z are world metres), so the villages on their shelves rise out of it.
+// Along a ray the depth below the top changes linearly, so the density
+// (a soft ramp around the top) integrates in closed form.
+fn fogTop(p: vec2f) -> f32 {
+  let drift = vec2f(u.camPos.w * 1.2, u.camPos.w * 0.5);
+  return 1032.0 + 0.12 * (p.y + 2048.0) + 64.0 + 26.0 * (vnoise((p + drift) * 0.0035) - 0.5) + 12.0 * (vnoise((p - drift) * 0.012) - 0.5);
+}
+fn rampInt(x: f32) -> f32 {
+  if (x < -0.5) { return 0.0; }
+  if (x > 0.5) { return x; }
+  return (x + 0.5) * (x + 0.5) * 0.5;
+}
+fn valleyFog(wp: vec3f) -> f32 {
+  let vf = u.extra2.x;
+  if (vf <= 0.001) { return 0.0; }
+  let H = 30.0;
+  let g0 = (fogTop(u.camPos.xz) - u.camPos.y) / H;
+  let g1 = (fogTop(wp.xz) - wp.y) / H;
+  var avg: f32;
+  if (abs(g1 - g0) > 1e-3) { avg = (rampInt(g1) - rampInt(g0)) / (g1 - g0); }
+  else { avg = clamp(g0 + 0.5, 0.0, 1.0); }
+  let dist = distance(wp, u.camPos.xyz);
+  return 1.0 - exp(-0.045 * vf * max(avg, 0.0) * dist);
+}
+
 fn applyFog(col: vec3f, wp: vec3f) -> vec3f {
   let f = fogAmount(wp);
   let dir = normalize(wp - u.camPos.xyz);
   let sd = max(dot(dir, u.sunDir.xyz), 0.0);
   var fc = skyColor(vec3f(dir.x, max(dir.y, -0.05) * 0.4, dir.z), false);
   fc += u.sunColor.rgb * u.sunDir.w * pow(sd, 8.0) * 0.08;
-  return mix(col, fc, f);
+  var c = mix(col, fc, f);
+  if (u.extra2.x > 0.001) {
+    // the fog's top lies in sunlight; it glows toward the sun
+    let vfa = valleyFog(wp);
+    let lit = u.sunColor.rgb * u.sunDir.w * (0.18 + 0.25 * smoothstep(0.0, 0.3, u.sunDir.y)) * (1.0 + 0.8 * pow(sd, 6.0));
+    // billows: brighter tops, bluer hollows between them
+    let bil = vnoise(wp.xz * 0.02 + vec2f(u.camPos.w * 0.05, 0.0));
+    let vc = lit * (0.75 + 0.5 * bil) + u.zenith.rgb * (0.32 + 0.1 * bil) + u.horizon.rgb * 0.25;
+    c = mix(c, vc, vfa);
+  }
+  return c;
 }
 
 // ---- shadows & lighting --------------------------------------------------------
@@ -521,6 +561,35 @@ fn meteors(d: vec3f) -> vec3f {
   return c * night * smoothstep(-0.02, 0.12, d.y);
 }
 
+// The Milky Way (preview only, ?milkyway): a faint band along a great
+// circle, with a brighter, warmer core and dark dust lanes along its middle.
+fn milkyWay(d: vec3f) -> vec3f {
+  if (u.extra2.y <= 0.0 || u.glow.w <= 0.0 || d.y < -0.05) { return vec3f(0.0); }
+  let G = normalize(vec3f(0.55, 0.42, 0.72)); // the band's pole
+  let A = normalize(cross(G, vec3f(0.0, 1.0, 0.0)));
+  let B = cross(G, A);
+  let lat = dot(d, G);
+  let lon = atan2(dot(d, B), dot(d, A));
+  let core = pow(max(dot(d, normalize(vec3f(-0.62, 0.18, 0.76))), 0.0), 3.0); // toward the galactic centre
+  let width = 0.13 + 0.09 * core;
+  let band = exp(-(lat * lat) / (width * width));
+  let q = vec2f(lon * 12.0, lat * 26.0);
+  let cloud = fbm(q, 4);
+  let dust = smoothstep(0.45, 0.72, fbm(q * 1.6 + vec2f(5.2, 1.3), 3)) * exp(-(lat * lat) / 0.004);
+  let glowL = band * (0.3 + 0.9 * cloud) * (1.0 - 0.8 * dust) * (0.5 + 1.5 * core);
+  // countless faint stars, far denser inside the band
+  let g = vec2f(lon * 420.0, lat * 420.0);
+  let cell = floor(g);
+  let hs = hashI(vec2i(cell) + vec2i(77, 191));
+  let jit = vec2f(hashI(vec2i(cell) + vec2i(5, 9)), hashI(vec2i(cell) + vec2i(13, 3))) * 0.6 + 0.2;
+  let dot1 = smoothstep(0.45, 0.0, length(g - cell - jit));
+  let dense = band * (1.0 - 0.7 * dust) * (0.6 + 0.8 * cloud);
+  let grain = dot1 * step(1.0 - 0.55 * dense, hs) * (0.4 + 0.6 * fract(hs * 37.0));
+  let col = mix(vec3f(0.62, 0.7, 0.95), vec3f(1.0, 0.86, 0.68), core);
+  let lum = glowL * 0.045 + grain * 0.22 * (0.6 + 0.8 * core);
+  return col * lum * u.glow.w * (1.0 - 0.55 * u.moon.w) * smoothstep(-0.05, 0.25, d.y);
+}
+
 // The moon: a large, bright disk with maria and a darkened limb.
 fn moonDisk(d: vec3f) -> vec4f {
   if (u.moon.w <= 0.0) { return vec4f(0.0); }
@@ -544,7 +613,7 @@ fn moonDisk(d: vec3f) -> vec4f {
 @fragment fn fs(in: SOut) -> @location(0) vec4f {
   let d = normalize(u.camFwd.xyz + in.ndc.x * u.camRight.w * u.camRight.xyz + in.ndc.y * u.camUp.w * u.camUp.xyz);
   var c = skyColor(d, true);
-  c += stars(d) + meteors(d);
+  c += stars(d) + meteors(d) + milkyWay(d);
   let mo = moonDisk(d);
   c = mix(c, mo.rgb, mo.a);
   let cl = clouds(u.camPos.xyz, d);
@@ -1435,6 +1504,65 @@ struct POut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1
     col = vec3f(0.75, 0.8, 0.85) * light;
   }
   a *= in.fade * u.weather.x;
+  return vec4f(col * a, a);
+}
+`;
+
+// ---- avalanche: a powder cloud running down a track -------------------------------
+// The front runs from the start to the end of the track, speeding up. Puffs
+// of snow dust are thrown up as it passes each point along the way; they
+// billow, rise a little, drift downhill and slowly settle out of the air.
+export const AVAL = COMMON + /* wgsl */ `
+struct AOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) a: f32, @location(2) wp: vec3f, @location(3) h: f32 };
+const AVAL_N = 140.0;
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> AOut {
+  var o: AOut;
+  o.pos = vec4f(0.0, 0.0, -2.0, 1.0);
+  var corners = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
+  let c = corners[vi];
+  let sd = u.aval2.w;
+  let h = vec3f(hash11(f32(ii) * 1.37 + sd), hash11(f32(ii) * 2.71 + sd * 1.9), hash11(f32(ii) * 3.97 + sd * 2.3));
+  let s0 = u.aval.xy;
+  let s1 = u.aval.zw;
+  let L = distance(s0, s1);
+  let dir = (s1 - s0) / max(L, 1.0);
+  let side = vec2f(-dir.y, dir.x);
+  // where along the track this puff is thrown up, and when the front gets there
+  let f = clamp((f32(ii) + h.x) / AVAL_N, 0.0, 1.0);
+  let tRun = u.aval2.y;
+  let born = tRun * pow(f, 0.6);
+  let age = u.aval2.x - born;
+  if (age < 0.0) { return o; }
+  // the slide spreads as it goes; puffs drift on downhill and settle
+  let spread = (12.0 + 40.0 * f) * (h.y - 0.5) * 2.0;
+  let drift = min(age, 3.0) * (6.0 + 6.0 * h.z) * (1.0 - 0.5 * f);
+  var xz = s0 + dir * (f * L + drift) + side * spread;
+  let size = (10.0 + 30.0 * (1.0 - exp(-age * 0.35))) * (0.65 + 0.7 * h.z) * (0.7 + 0.5 * f);
+  let ground = heightAt(xz);
+  let centre = vec3f(xz.x, ground + size * 0.45 + age * (0.5 + 0.8 * h.y), xz.y);
+  let a = smoothstep(0.0, 0.5, age) * exp(-age / (6.0 + 5.0 * h.y)) * 0.85;
+  if (a < 0.003) { return o; }
+  // spin each puff a little so neighbours do not line up
+  let ang = h.z * 6.283 + age * (h.x - 0.5) * 0.3;
+  let cs = vec2f(cos(ang), sin(ang));
+  let q = vec2f(c.x * cs.x - c.y * cs.y, c.x * cs.y + c.y * cs.x);
+  let wp = centre + (u.camRight.xyz * q.x + u.camUp.xyz * q.y) * size;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.uv = c;
+  o.a = a;
+  o.wp = wp;
+  o.h = h.x * 17.0 + h.z;
+  return o;
+}
+@fragment fn fs(in: AOut) -> @location(0) vec4f {
+  let r = length(in.uv);
+  if (r > 1.0) { discard; }
+  let n = vnoise(in.uv * 2.3 + vec2f(in.h, in.h * 0.7)) * 0.6 + vnoise(in.uv * 5.1 + vec2f(in.h * 1.3, 2.0)) * 0.4;
+  var a = smoothstep(1.0, 0.25, r + (n - 0.5) * 0.55) * in.a;
+  // lit like fresh snow: the sun from above, the sky all round
+  let lit = u.sunColor.rgb * u.sunDir.w * (0.55 + 0.45 * (1.0 - in.uv.y) * 0.5) + ambient(vec3f(0.0, 1.0, 0.0)) * 1.25;
+  var col = vec3f(0.9, 0.92, 0.96) * lit;
+  col = applyFog(col, in.wp);
   return vec4f(col * a, a);
 }
 `;

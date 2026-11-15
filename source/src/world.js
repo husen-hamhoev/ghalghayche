@@ -316,6 +316,51 @@ export function planWorld(t, seed = 7) {
   return { villages: [erzi, egikal, targim, vov], watch, sites, paths, taken, vov, table, erzi, egikal, targim, fold, bridge, mills, waterfall, lake, glacier, melt, kyazi, koazoy };
 }
 
+// Avalanche tracks: start on snow-holding slopes high up (steep, but not so
+// steep that snow cannot lie), follow the fall line down until the ground
+// levels out, and keep the part that runs roughly straight (the effect moves
+// along a straight line over the terrain). `top` is the start height, so the
+// game can pick only tracks that are under snow in the current season.
+export function findAvalanches(t, seed = 91) {
+  const rng = mulberry32(seed);
+  const tracks = [];
+  for (let i = 0; i < 6000 && tracks.length < 48; i++) {
+    const x = MIN + 120 + rng() * (SIZE - 240), z = MIN + 120 + rng() * (SIZE - 240);
+    const y = t.sample(x, z);
+    if (y < 1850) continue;
+    const ny = t.normal(x, z, 8)[1];
+    if (ny < 0.6 || ny > 0.85) continue;
+    if (tracks.some((k) => Math.hypot(k.sx - x, k.sz - z) < 180)) continue;
+    // follow the steepest descent
+    const pts = [[x, z]];
+    let px = x, pz = z, flat = 0;
+    for (let s = 0; s < 220; s++) {
+      const e = 6;
+      const gx = (t.sample(px + e, pz) - t.sample(px - e, pz)) / (2 * e);
+      const gz = (t.sample(px, pz + e) - t.sample(px, pz - e)) / (2 * e);
+      const g = Math.hypot(gx, gz);
+      if (g < 0.22) { if (++flat > 6) break; } else flat = 0;
+      px -= (gx / (g || 1)) * 4; pz -= (gz / (g || 1)) * 4;
+      if (Math.abs(px) > -MIN - 60 || Math.abs(pz) > -MIN - 60) break;
+      if (Math.min(distMain(px, pz), distTrib(px, pz)) < 20) break;
+      pts.push([px, pz]);
+    }
+    // keep the longest prefix that stays near the straight line to its end
+    let end = pts.length - 1;
+    for (; end > 10; end--) {
+      const [ex, ez] = pts[end], dx = ex - x, dz = ez - z, l = Math.hypot(dx, dz);
+      let dev = 0;
+      for (let k = 1; k < end; k++) dev = Math.max(dev, Math.abs((pts[k][0] - x) * dz - (pts[k][1] - z) * dx) / l);
+      if (dev < Math.max(18, l * 0.1)) break;
+    }
+    const [ex, ez] = pts[end];
+    const len = Math.hypot(ex - x, ez - z), drop = y - t.sample(ex, ez);
+    if (len < 160 || drop < 110) continue;
+    tracks.push({ sx: x, sz: z, ex, ez, top: y, len, drop });
+  }
+  return tracks;
+}
+
 // Search the gorge walls for a long, steep drop and follow it downhill.
 function findWaterfall(t, rng) {
   let best = null, bestDrop = 0;

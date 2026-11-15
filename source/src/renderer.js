@@ -7,7 +7,7 @@ import { pineMesh, broadleafMesh, rockMesh, cragMesh, sheepMesh, eagleMesh, hors
 
 const HDR = 'rgba16float';
 const DEPTH = 'depth32float';
-const UBO_SIZE = 416;
+const UBO_SIZE = 464;
 
 // WGSL template literals carry lots of indentation; trim it at load.
 const wgsl = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ');
@@ -305,6 +305,15 @@ export class Renderer {
       multisample: { count: msaa },
     });
     this.alphaBlend = alphaBlend;
+    const am = mod(S.AVAL);
+    this.avalPipe = d.createRenderPipeline({
+      layout: this.pipeLayout,
+      vertex: { module: am, entryPoint: 'vs' },
+      fragment: { module: am, entryPoint: 'fs', targets: [{ format: HDR, blend: alphaBlend }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'greater' },
+      multisample: { count: msaa },
+    });
     const bugs = mod(S.BUGS);
     this.fireflyPipe = d.createRenderPipeline({
       layout: this.pipeLayout,
@@ -511,6 +520,9 @@ export class Renderer {
     u.set(env.season ?? [0, 0, 0, 0], 92);
     u.set(env.weather ?? [0, 0, 0, 0], 96);
     u.set([0, 0, env.lightningAz ?? 0, 0], 100);
+    u.set([env.valleyFog ?? 0, this.milkyWay ? 1 : 0, 0, 0], 104);
+    const av = this.aval;
+    u.set(av ? [av.sx, av.sz, av.ex, av.ez, av.t, av.run, 1, av.seed] : [0, 0, 0, 0, 0, 0, 0, 0], 108);
 
     // is the lake near and in view? then render its reflection this frame
     let reflect = false, reflVP = null;
@@ -697,6 +709,8 @@ export class Renderer {
         pass.setVertexBuffer(0, this.fx.buf);
         pass.draw(6, this.fx.count);
       }
+      // an avalanche's powder cloud
+      if (this.aval) { pass.setPipeline(this.avalPipe); pass.draw(6, 140); }
       // fireflies after dark
       if (!OFF.has('bugs')) { pass.setPipeline(this.fireflyPipe); pass.draw(6, q.fireflies); }
       // rain or snow

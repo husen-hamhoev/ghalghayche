@@ -1,7 +1,7 @@
 // Entry point: builds the world, runs the camera, menu and frame loop.
 
 import { Terrain, RIVER, TRIB, MIN, N, CELL, distMain, distTrib } from './terrain.js';
-import { planWorld, buildStructures, scatter, buildWater, makeViewpoints, riverSurfaces } from './world.js';
+import { planWorld, buildStructures, scatter, buildWater, makeViewpoints, riverSurfaces, findAvalanches } from './world.js';
 import { Renderer } from './renderer.js';
 import { Soundscape } from './audio.js';
 import { PRESETS, ORDER, loadSettings, saveSettings, AutoQuality } from './quality.js';
@@ -56,6 +56,7 @@ async function main() {
   const viewpoints = makeViewpoints(terrain, plan);
   const sets = scatter(terrain, plan, 1);
   const water = buildWater(terrain, surf, plan.waterfall, plan.melt);
+  const avalancheTracks = findAvalanches(terrain);
   setProgress(0.88, t('status.light'));
   await tick();
 
@@ -358,6 +359,16 @@ async function main() {
     return Math.max(0, 1 - f * 6) + (f > 0.15 && f < 0.32 ? 0.6 * (1 - (f - 0.15) / 0.17) : 0);
   };
   const grey = (c, k) => { const l = (c[0] + c[1] + c[2]) / 3; return c.map((v) => lerp(v, l * 0.75, k)); };
+  // Morning valley fog: forms before dawn, fills the gorge at sunrise and
+  // burns off as the sun climbs. Thickest in autumn, thinner in summer.
+  const VALLEY_FOG = { dawn: 1, morning: 0.45 };
+  const valleyFog = () => {
+    const base = settings.time === 'cycle'
+      ? smoothstep(3, 5.5, clock) * (1 - smoothstep(7.4, 10.2, clock))
+      : VALLEY_FOG[settings.time] ?? 0;
+    const k = { spring: 1, summer: 0.85, autumn: 1, winter: 0.75 }[settings.season] ?? 1;
+    return base * k * (1 - 0.6 * wx.rain);
+  };
   const withWeather = (e, flash) => {
     const c = wx.cloud;
     const season = SEASONS.find((x) => x.id === settings.season).v;
@@ -377,6 +388,7 @@ async function main() {
       weather: [wx.rain, c, flash, wx.rainbow * (e.skySun[1] > 0.02 && e.skySun[1] < 0.66 ? 1 : 0)],
       season,
       lightningAz: wx.az,
+      valleyFog: valleyFog(),
     };
   };
   $('sound').onclick = () => setSound(!settings.sound);
@@ -537,6 +549,53 @@ async function main() {
   let last = performance.now();
   let fade = AUTO ? 1 : 0;
   let frames = 0, fpsT = 0, fps = 0;
+  // Avalanches: now and then one of the tracks that is under snow this
+  // season, and in view, lets go. Its rumble arrives as late as sound would.
+  if (params.has('milkyway')) renderer.milkyWay = true;
+  const av = { next: params.has('avalanche') ? 2.5 : 20 + Math.random() * 30, cur: null };
+  const inSight = (x, z) => {
+    const y = terrain.sample(x, z) + 18;
+    for (let i = 1; i < 48; i++) {
+      const f = i / 48;
+      const px = lerp(cam.pos[0], x, f), pz = lerp(cam.pos[2], z, f);
+      if (terrain.sample(px, pz) > lerp(cam.pos[1], y, f)) return false;
+    }
+    return true;
+  };
+  const updateAvalanche = (dt) => {
+    if (av.cur) {
+      av.cur.t += dt;
+      if (av.cur.t > av.cur.run + 24) { av.cur = null; renderer.aval = null; }
+      return;
+    }
+    if (!started && !AUTO) return;
+    av.next -= dt;
+    if (av.next > 0) return;
+    const line = env.snowline - (settings.season === 'winter' ? 1500 : 0) - (settings.season === 'spring' ? 250 : 0);
+    const fx = cam.fwd[0], fz = cam.fwd[2], fl = Math.hypot(fx, fz) || 1;
+    const cands = [];
+    for (const k of avalancheTracks) {
+      if (k.top < line + 100) continue;
+      const mx = (k.sx + k.ex) / 2 - cam.pos[0], mz = (k.sz + k.ez) / 2 - cam.pos[2], d = Math.hypot(mx, mz);
+      if (d < 250 || d > 3600) continue;
+      if ((mx * fx + mz * fz) / (d * fl) < 0.62) continue;
+      // the slope must face us, and the track must not be hidden behind a ridge
+      const tx = k.ex - k.sx, tz = k.ez - k.sz;
+      if ((tx * (cam.pos[0] - k.sx) + tz * (cam.pos[2] - k.sz)) / (Math.hypot(tx, tz) * Math.hypot(cam.pos[0] - k.sx, cam.pos[2] - k.sz)) < 0.2) continue;
+      if (!inSight(k.sx, k.sz) || !inSight((k.sx + k.ex) / 2, (k.sz + k.ez) / 2)) continue;
+      cands.push({ k, d, mx, mz });
+    }
+    if (!cands.length) { av.next = 6; return; }
+    cands.sort((a, b) => a.d - b.d);
+    const c = cands[Math.floor(Math.random() * Math.min(3, cands.length))];
+    av.cur = { ...c.k, t: 0, run: 4 + c.k.len / 38, seed: Math.random() * 100 };
+    renderer.aval = av.cur;
+    if (params.has('avalanche')) console.info('avalanche', Math.round(c.d), 'm away', [c.k.sx, c.k.sz, c.k.ex, c.k.ez].map(Math.round).join(','));
+    const pan = (c.mx * cam.right[0] + c.mz * cam.right[2]) / c.d;
+    audio.avalanche(c.d / 343, clamp(1.15 - c.d / 3000, 0.15, 1), pan, av.cur.run);
+    av.next = 60 + Math.random() * 80;
+  };
+
   const t0 = performance.now();
 
   function frame(now) {
@@ -574,6 +633,7 @@ async function main() {
       if (menuOpen) $('time').querySelector('button:last-child').textContent = `${t('time.cycle')} · ${fmtClock(clock)}`;
     }
     env.fade = fade;
+    updateAvalanche(dt);
     const flash = updateWeather(dt, env.skySun[1] > 0);
     const renderEnv = withWeather(env, flash);
     renderer.render(cam, renderEnv, time);
