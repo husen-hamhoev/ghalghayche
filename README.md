@@ -91,7 +91,7 @@ URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|mornin
 - **Lake reflection**: when the lake is near and in view, the terrain, distant mountains, towers and sky are drawn a second time, mirrored in the water plane, at half resolution, and the lake shows that image with ripples. Geometry below the water is clipped by a pipeline constant, so the normal pipelines carry no discard.
 - **Grass**: tufts are generated in the vertex shader on a grid that follows the camera, so no instance buffer is needed.
 - **Animals**: sheep graze in the vertex shader (head down and nibbling, then a few steps to fresh grass); eagles circle, glide and beat their wings.
-- **Sound**: nature only. On iPhone and iPad the sound comes back after you leave Safari and return (with a tap if iOS insists). Wind, the river and the waterfall from filtered noise, rain and thunder, birdsong, an eagle's cry, the bleating of sheep and a crackling campfire.
+- **Sound**: nature only. Wind, the river and the waterfall from filtered noise, rain and thunder, birdsong, an eagle's cry, the bleating of sheep and a crackling campfire. On iPhone and iPad it comes back when you return to Safari from the home screen (after a tap, if iOS insists).
 
 ## Make it your own
 
