@@ -11,10 +11,11 @@ export class Soundscape {
   }
 
   start() {
-    if (this.ctx) { this.ctx.resume(); return; }
+    if (this.ctx) { this.wake(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     const ctx = (this.ctx = new AC());
+    if (!this.listening) this.#listen();
     this.master = ctx.createGain();
     this.master.gain.value = this.enabled ? 0.9 : 0;
     const comp = ctx.createDynamicsCompressor();
@@ -40,6 +41,41 @@ export class Soundscape {
     this.rainHi = this.#noiseVoice(noise, 'highpass', 4000, 0.5);
     this.fallHi = this.#noiseVoice(noise, 'highpass', 3000, 0.7);
     this.gust = 0.5; this.gustTarget = 0.5; this.t = 0;
+  }
+
+  // iOS suspends ("interrupts") the audio when the page goes to the
+  // background and does not bring it back by itself; it may only be resumed
+  // from a touch. So: pause while hidden, try to resume when the page shows
+  // again, and retry on every touch, click or key until it is running. If the
+  // context will not come back at all, build a fresh one.
+  wake(fromGesture = false) {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state === 'running' || ctx.state === 'closed' || document.hidden) return;
+    ctx.resume().catch(() => {});
+    if (fromGesture) {
+      clearTimeout(this.retry);
+      this.retry = setTimeout(() => {
+        if (this.ctx === ctx && ctx.state !== 'running' && !document.hidden) {
+          ctx.close().catch(() => {});
+          this.ctx = null;
+          this.start();
+        }
+      }, 600);
+    }
+  }
+
+  #listen() {
+    this.listening = true;
+    document.addEventListener('visibilitychange', () => {
+      if (!this.ctx) return;
+      if (document.hidden) this.ctx.suspend().catch(() => {});
+      else this.wake();
+    });
+    window.addEventListener('pageshow', () => this.wake());
+    window.addEventListener('focus', () => this.wake());
+    for (const ev of ['touchend', 'pointerup', 'click', 'keydown']) {
+      window.addEventListener(ev, () => this.wake(true), { capture: true, passive: true });
+    }
   }
 
   setEnabled(on) {

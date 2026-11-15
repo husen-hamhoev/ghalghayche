@@ -740,6 +740,52 @@ export function scatter(t, plan, density = 1, seed = 23) {
   batSpots.forEach(([x, z], k) => { for (let i = 0; i < 3; i++) put('bats', [x + (rng() - 0.5) * 30, t.sample(x, z) + 14 + rng() * 10, z + (rng() - 0.5) * 30, rng() * 100, 0, 0, 0, 0], half(k * 3 + i)); });
   moreBats.forEach(([x, z], k) => { for (let i = 0; i < 4; i++) put('bats', [x + (rng() - 0.5) * 30, t.sample(x, z) + 12 + rng() * 10, z + (rng() - 0.5) * 30, rng() * 100, 0, 0, 0, 0], k < 3 ? 2 : 3); });
 
+  // sheep grazing on the slopes around Kyazi, right up to its towers and walls
+  // (own random stream, so the animals placed above stay where they are)
+  {
+    const k = plan.kyazi, kr = mulberry32(seed + 77);
+    const tw = k.towers, [sx, sz] = k.side;
+    const corner = (p) => ({ x: p.x + sx * 16, z: p.z + sz * 16 });
+    const walls = tw.slice(1).map((p, i) => [tw[i], p]);
+    walls.push([tw[0], corner(tw[0])], [corner(tw[0]), corner(tw[5])], [corner(tw[5]), tw[5]]);
+    const segDist = (x, z, a, b) => {
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const f = clamp(((x - a.x) * dx + (z - a.z) * dz) / (dx * dx + dz * dz || 1), 0, 1);
+      return Math.hypot(x - a.x - dx * f, z - a.z - dz * f);
+    };
+    const clear = (x, z) =>
+      !tw.some((p) => Math.hypot(p.x - x, p.z - z) < 8) && !k.crypts.some((p) => Math.hypot(p.x - x, p.z - z) < 5) &&
+      !walls.some(([a, b]) => segDist(x, z, a, b) < 2.2) && t.normal(x, z)[1] > 0.78;
+    const centres = [];
+    // the first on the slope facing the viewpoint, the second on the
+    // courtyard side, the third anywhere around
+    const [fx, fz] = plan.koazoy.face;
+    const aims = [[k.x + fx * 34, k.z + fz * 34, 14], [k.x + sx * 70, k.z + sz * 70, 45], [k.x, k.z, 160]];
+    for (let i = 0; i < 1500 && centres.length < 3; i++) {
+      const [ox, oz, R] = aims[centres.length];
+      const a = kr() * 6.283, r = Math.sqrt(kr()) * R;
+      const x = ox + Math.cos(a) * r, z = oz + Math.sin(a) * r;
+      if (centres.length && Math.hypot(x - k.x, z - k.z) < 40) continue;
+      if (t.normal(x, z)[1] < (centres.length ? 0.88 : 0.8) || !clear(x, z) || centres.some((c) => Math.hypot(c.x - x, c.z - z) < 60)) continue;
+      if (Math.min(distMain(x, z), distTrib(x, z)) < 60) continue;
+      centres.push({ x, z, h: t.sample(x, z) });
+    }
+    centres.forEach((c, ci) => {
+      // the first flock is there at every level, the others at Normal and Many
+      const tierOf = (i) => (ci === 0 ? half(i) : ci);
+      const [dx, dy] = ANIMAL_SCALE.dog, ds = 0.9 + kr() * 0.2;
+      put('dogs', [c.x + 8, t.sample(c.x + 8, c.z - 6), c.z - 6, 0, dx * ds, dy * ds, kr(), 2.2], ci === 0 ? 0 : ci);
+      const n = 28 + Math.floor(kr() * 12);
+      for (let i = 0; i < n; i++) {
+        const a = kr() * 6.283, r = Math.sqrt(kr()) * 24;
+        const x = c.x + Math.cos(a) * r, z = c.z + Math.sin(a) * r;
+        if (!clear(x, z)) continue;
+        put('sheep', [x, t.sample(x, z), z, kr() * 6.283, 0.9 + kr() * 0.2, 0.9 + kr() * 0.2, kr(), 1], tierOf(i));
+      }
+      flocks.push({ ...c, tier: ci });
+    });
+  }
+
   const tiered = (kind) => {
     const items = T[kind].sort((a, b) => a[0] - b[0]);
     const set = new InstanceSet(items.map((x) => x[1]), false);
@@ -895,9 +941,9 @@ export function makeViewpoints(t, plan) {
   const { kyazi, koazoy } = plan;
   {
     const [fx, fz] = koazoy.face; // from the wall toward Kyazi
-    const x = kyazi.x + fx * 140 - fz * 25, z = kyazi.z + fz * 140 + fx * 25;
-    const from = [x, Math.max(t.sample(x, z) + 12, kyazi.h + 48), z];
-    vps.push(look('Kyazi', 'Six residential towers on a ridge crest, joined by a defensive wall', from, [kyazi.x - fx * 300, kyazi.h + 62, kyazi.z - fz * 300]));
+    const x = kyazi.x + fx * 100 - fz * 36, z = kyazi.z + fz * 100 + fx * 36;
+    const from = [x, Math.max(t.sample(x, z) + 12, kyazi.h + 85), z];
+    vps.push(look('Kyazi', 'Six residential towers on a ridge crest, joined by a defensive wall', from, [kyazi.x - fx * 110, kyazi.h - 30, kyazi.z - fz * 110]));
   }
   // 8: Koazoy-Loam, from just off its summit, over the wall toward Kyazi
   // and the gorge

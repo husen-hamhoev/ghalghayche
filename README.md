@@ -22,7 +22,7 @@ Download `index.html` and open it in a browser with WebGPU: a recent Chrome or E
 - Warm firelight in the windows of Erzi after dark
 - Dry-stone walls, terraced fields, footpaths and the road along the river
 - A tributary canyon with towers raised on rock pillars
-- **Kyazi**: a small castle of six residential towers strung along a ridge crest, mostly in ruins, joined by a defensive wall that closes a courtyard, with two crypts nearby
+- **Kyazi**: a small castle of six residential towers strung along a ridge crest, mostly in ruins, joined by a defensive wall that closes a courtyard, with two crypts nearby and flocks of sheep grazing on its flanks
 - **Koazoy-Loam**, the mountain of the Koazoy family: a ridge of the Rocky Range across the valley from Kyazi, breaking off in a sheer limestone wall with a ledge and scree below, its jagged crest a little higher than the Table Mountain
 - Pine and birch woods, scree and cliffs and boulders
 - Animals: sheep and horses grazing with shepherd dogs, East Caucasian tur on the cliffs, a wolf pack trotting the high meadows, eagles circling over the villages and bearded vultures soaring along the ridges
@@ -91,7 +91,7 @@ URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|mornin
 - **Lake reflection**: when the lake is near and in view, the terrain, distant mountains, towers and sky are drawn a second time, mirrored in the water plane, at half resolution, and the lake shows that image with ripples. Geometry below the water is clipped by a pipeline constant, so the normal pipelines carry no discard.
 - **Grass**: tufts are generated in the vertex shader on a grid that follows the camera, so no instance buffer is needed.
 - **Animals**: sheep graze in the vertex shader (head down and nibbling, then a few steps to fresh grass); eagles circle, glide and beat their wings.
-- **Sound**: nature only. Wind, the river and the waterfall from filtered noise, rain and thunder, birdsong, an eagle's cry, the bleating of sheep and a crackling campfire.
+- **Sound**: nature only. On iPhone and iPad the sound comes back after you leave Safari and return (with a tap if iOS insists). Wind, the river and the waterfall from filtered noise, rain and thunder, birdsong, an eagle's cry, the bleating of sheep and a crackling campfire.
 
 ## Make it your own
 
