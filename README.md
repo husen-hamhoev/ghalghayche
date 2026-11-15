@@ -76,7 +76,7 @@ URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|mornin
 - **Temporal upscaling**: the scene renders at 60–75% resolution with a different sub-pixel jitter each frame. A resolve pass reprojects last frame's full-resolution image using depth and the previous camera, blends in the new samples by how close each landed to the output pixel, and clamps the history to the current neighbourhood so moving things don't ghost. A light sharpen follows. This replaces MSAA and gives a sharp, anti-aliased image at a fraction of the cost, especially on high-density phone screens. `?taa=0` switches back to MSAA.
 - **Grass**: tufts are generated in the vertex shader on a grid that follows the camera, so no instance buffer is needed.
 - **Animals**: sheep graze in the vertex shader (head down and nibbling, then a few steps to fresh grass); eagles circle, glide and beat their wings.
-- **Sound**: nature only. Wind, the river and the waterfall from filtered noise, birdsong, an eagle's cry, the bleating of sheep, a crackling campfire and, at night, wolves howling.
+- **Sound**: nature only. Wind, the river and the waterfall from filtered noise, birdsong, an eagle's cry, the bleating of sheep and a crackling campfire.
 
 ## Make it your own
 
