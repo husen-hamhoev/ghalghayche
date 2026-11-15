@@ -1,0 +1,918 @@
+// WGSL for every pass. The shared prelude holds the frame uniforms, noise,
+// sky, fog and lighting so all materials sit in the same light and haze.
+
+const COMMON = /* wgsl */ `
+struct U {
+  viewProj: mat4x4f,
+  shadowMat: mat4x4f,
+  camPos: vec4f,    // w: time (s)
+  camRight: vec4f,  // w: tan(fovx/2)
+  camUp: vec4f,     // w: tan(fovy/2)
+  camFwd: vec4f,    // w: cloud cover
+  sunDir: vec4f,    // w: sun intensity
+  sunColor: vec4f,  // w: ambient intensity
+  zenith: vec4f,    // w: exposure
+  horizon: vec4f,   // w: snow line (m)
+  fog: vec4f,       // density, 1/scaleHeight, base height, valley mist
+  world: vec4f,     // min, cell, samples, size
+  grass: vec4f,     // origin x, origin z, spacing, grid size
+  params: vec4f,    // grass radius, shadow texel, tree fade dist, grass blades on
+  skySun: vec4f,    // the real sun (may be below the horizon), w: glow strength
+  glow: vec4f,      // sun glow / afterglow colour, w: star visibility
+  moon: vec4f,      // moon direction, w: moon brightness
+};
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var heightTex: texture_2d<f32>;
+@group(0) @binding(2) var normalTex: texture_2d<f32>;
+@group(0) @binding(3) var splatTex: texture_2d<f32>;
+@group(0) @binding(4) var lightTex: texture_2d<f32>;
+@group(0) @binding(5) var linSamp: sampler;
+@group(0) @binding(6) var shadowMap: texture_depth_2d;
+@group(0) @binding(7) var shadowSamp: sampler_comparison;
+
+fn hashU(x: u32) -> u32 {
+  var h = x * 747796405u + 2891336453u;
+  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+  return (h >> 22u) ^ h;
+}
+fn hashI(p: vec2i) -> f32 {
+  let h = hashU((u32(p.x) * 1597334677u) ^ hashU(u32(p.y) * 3812015801u));
+  return f32(h) * (1.0 / 4294967295.0);
+}
+fn hash21(p: vec2f) -> f32 { return hashI(vec2i(floor(p))); }
+fn hash11(x: f32) -> f32 { return f32(hashU(bitcast<u32>(x))) * (1.0 / 4294967295.0); }
+
+// Value noise with analytic derivatives: (value, d/dx, d/dy), value in 0..1.
+fn vnoiseD(p: vec2f) -> vec3f {
+  let i = vec2i(floor(p));
+  let f = fract(p);
+  let w = f * f * (3.0 - 2.0 * f);
+  let dw = 6.0 * f * (1.0 - f);
+  let a = hashI(i);
+  let b = hashI(i + vec2i(1, 0));
+  let c = hashI(i + vec2i(0, 1));
+  let d = hashI(i + vec2i(1, 1));
+  let k1 = b - a; let k2 = c - a; let k4 = a - b - c + d;
+  return vec3f(a + k1 * w.x + k2 * w.y + k4 * w.x * w.y, dw * vec2f(k1 + k4 * w.y, k2 + k4 * w.x));
+}
+fn vnoise(p: vec2f) -> f32 { return vnoiseD(p).x; }
+
+const ROT = mat2x2f(0.8, 0.6, -0.6, 0.8);
+fn fbm(p0: vec2f, oct: i32) -> f32 {
+  var p = p0; var s = 0.0; var a = 0.5;
+  for (var i = 0; i < oct; i++) { s += a * vnoise(p); p = ROT * p * 2.03 + vec2f(13.1, 7.7); a *= 0.5; }
+  return s;
+}
+// fbm with derivative (for bump-mapped detail normals).
+fn fbmD(p0: vec2f, oct: i32) -> vec3f {
+  var p = p0; var s = vec3f(0.0); var a = 0.5; var m = mat2x2f(1.0, 0.0, 0.0, 1.0);
+  for (var i = 0; i < oct; i++) {
+    let n = vnoiseD(p);
+    s += a * vec3f(n.x, transpose(m) * n.yz);
+    m = ROT * m * 2.03;
+    p = ROT * p * 2.03 + vec2f(13.1, 7.7);
+    a *= 0.5;
+  }
+  return s;
+}
+
+fn texUV(p: vec2f) -> vec2f { return ((p - u.world.x) / u.world.y + 0.5) / u.world.z; }
+
+fn heightAt(p: vec2f) -> f32 {
+  let g = clamp((p - u.world.x) / u.world.y, vec2f(0.0), vec2f(u.world.z - 1.001));
+  let i = vec2i(floor(g));
+  let f = g - floor(g);
+  let a = textureLoad(heightTex, i, 0).r;
+  let b = textureLoad(heightTex, i + vec2i(1, 0), 0).r;
+  let c = textureLoad(heightTex, i + vec2i(0, 1), 0).r;
+  let d = textureLoad(heightTex, i + vec2i(1, 1), 0).r;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// ---- sky -------------------------------------------------------------------
+fn skyColor(d: vec3f, sunDisk: bool) -> vec3f {
+  let y = max(d.y, 0.0);
+  var c = mix(u.horizon.rgb, u.zenith.rgb, pow(y, 0.42));
+  if (d.y < 0.0) { c = u.horizon.rgb * (0.9 + 0.1 * exp(d.y * 8.0)); }
+  let sun = u.skySun.xyz;
+  let sd = max(dot(d, sun), 0.0);
+  let low = 1.0 - smoothstep(0.0, 0.5, sun.y);
+  let g = u.glow.rgb * u.skySun.w;
+  c += g * (pow(sd, 5.0) * (0.12 + 0.35 * low) + pow(sd, 40.0) * 0.35) * (1.0 - 0.6 * y);
+  // afterglow: a warm band along the horizon under a set sun
+  let az = max(dot(normalize(d.xz + vec2f(1e-5)), normalize(sun.xz + vec2f(1e-5))), 0.0);
+  let below = smoothstep(0.05, -0.04, sun.y);
+  c += g * below * pow(az, 3.0) * exp(-y * 9.0) * 0.6;
+  if (sunDisk && sun.y > -0.02) { c += u.glow.rgb * smoothstep(0.99965, 0.9999, sd) * 60.0; }
+  // soft halo around the moon
+  let md = max(dot(d, u.moon.xyz), 0.0);
+  c += vec3f(0.55, 0.62, 0.8) * u.moon.w * (pow(md, 1500.0) * 0.25 + pow(md, 120.0) * 0.08 + pow(md, 12.0) * 0.02);
+  return c;
+}
+
+// Height fog with an analytic integral, plus a thin valley mist layer.
+fn applyFog(col: vec3f, wp: vec3f) -> vec3f {
+  let v = wp - u.camPos.xyz;
+  let dist = length(v);
+  let dir = v / max(dist, 1e-3);
+  let b = u.fog.y;
+  let y0 = u.camPos.y - u.fog.z;
+  var amt: f32;
+  let k = b * dir.y;
+  if (abs(k) > 1e-5) { amt = u.fog.x * exp(-b * y0) * (1.0 - exp(-k * dist)) / k; }
+  else { amt = u.fog.x * exp(-b * y0) * dist; }
+  // valley mist: thin layer near the river floor
+  let bm = 1.0 / 90.0;
+  let ym = u.camPos.y - (u.fog.z + 40.0);
+  let km = bm * dir.y;
+  var mist: f32;
+  if (abs(km) > 1e-5) { mist = u.fog.w * exp(-bm * ym) * (1.0 - exp(-km * dist)) / km; }
+  else { mist = u.fog.w * exp(-bm * ym) * dist; }
+  let f = 1.0 - exp(-max(amt + mist, 0.0));
+  let sd = max(dot(dir, u.sunDir.xyz), 0.0);
+  var fc = skyColor(vec3f(dir.x, max(dir.y, -0.05) * 0.4, dir.z), false);
+  fc += u.sunColor.rgb * u.sunDir.w * pow(sd, 8.0) * 0.08;
+  return mix(col, fc, clamp(f, 0.0, 1.0));
+}
+
+// ---- shadows & lighting --------------------------------------------------------
+fn shadowMapVis(wp: vec3f, n: vec3f) -> f32 {
+  let sp = u.shadowMat * vec4f(wp + n * 0.18, 1.0);
+  let uv = sp.xy * vec2f(0.5, -0.5) + 0.5;
+  if (any(uv < vec2f(0.001)) || any(uv > vec2f(0.999)) || sp.z > 1.0 || sp.z < 0.0) { return 1.0; }
+  let t = u.params.y;
+  var s = 0.0;
+  for (var j = -1; j <= 1; j++) {
+    for (var i = -1; i <= 1; i++) {
+      s += textureSampleCompareLevel(shadowMap, shadowSamp, uv + vec2f(f32(i), f32(j)) * t, sp.z - 0.0004);
+    }
+  }
+  let e = max(abs(uv.x - 0.5), abs(uv.y - 0.5)) * 2.0;
+  return mix(s / 9.0, 1.0, smoothstep(0.8, 1.0, e));
+}
+
+fn terrainLight(p: vec2f) -> vec4f { return textureSampleLevel(lightTex, linSamp, texUV(p), 0.0); }
+
+// Sun visibility for something standing above the terrain: the light texture
+// stores how high above the ground the sun becomes visible (b).
+fn objectSunVis(wp: vec3f, n: vec3f) -> f32 {
+  let l = terrainLight(wp.xz);
+  let above = wp.y - heightAt(wp.xz);
+  let t = smoothstep(l.b - 1.0, l.b + 3.0 + l.b * 0.05, above);
+  return min(max(l.r, t), shadowMapVis(wp, n));
+}
+
+fn ambient(n: vec3f) -> vec3f {
+  let sky = mix(u.horizon.rgb * 0.9, mix(u.horizon.rgb, u.zenith.rgb * 1.3, 0.55), n.y * 0.5 + 0.5);
+  let ground = vec3f(0.30, 0.27, 0.20) * (u.sunColor.rgb * 0.3 + 0.1);
+  return mix(ground, sky, smoothstep(-0.6, 0.6, n.y)) * u.sunColor.w;
+}
+
+fn shade(albedo: vec3f, n: vec3f, vis: f32, ao: f32, wrap: f32) -> vec3f {
+  let l = u.sunDir.xyz;
+  let ndl = clamp((dot(n, l) + wrap) / (1.0 + wrap), 0.0, 1.0);
+  let sun = u.sunColor.rgb * u.sunDir.w * ndl * vis;
+  return albedo * (sun + ambient(n) * ao);
+}
+
+fn tonemapACES(x: vec3f) -> vec3f {
+  let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
+}
+`;
+
+// ---- terrain ---------------------------------------------------------------
+const TERRAIN_SHADE = /* wgsl */ `
+fn grassTone(p: vec2f, h: f32) -> vec3f {
+  let m = fbm(p * 0.0021, 3);
+  let m2 = vnoise(p * 0.017);
+  let lush = vec3f(0.062, 0.098, 0.03);
+  let deep = vec3f(0.045, 0.075, 0.028);
+  let dry = vec3f(0.15, 0.135, 0.058);
+  let alpine = vec3f(0.13, 0.115, 0.065);
+  var c = mix(deep, lush, smoothstep(0.3, 0.6, m2));
+  c = mix(c, dry, smoothstep(0.5, 0.85, m + m2 * 0.25) * 0.8);
+  c = mix(c, alpine, smoothstep(1770.0, 2190.0, h + m * 210.0));
+  return c * (0.85 + 0.3 * vnoise(p * 0.11));
+}
+
+fn terrainColor(wp: vec3f, nIn: vec3f, splat: vec4f, sunVis: f32, ao: f32, dist: f32) -> vec3f {
+  // Detail normal: two octave bands, faded with distance.
+  let fade1 = 1.0 - smoothstep(600.0, 2500.0, dist);
+  let fade2 = 1.0 - smoothstep(30.0, 220.0, dist);
+  let d1 = fbmD(wp.xz * 0.045, 4);
+  let d2 = fbmD(wp.xz * 0.6, 3);
+  let steep = 1.0 - nIn.y;
+  let bump = d1.yz * 0.045 * 9.0 * fade1 * (0.4 + steep * 3.0) + d2.yz * 0.6 * 0.18 * fade2;
+  let n = normalize(nIn - vec3f(bump.x, 0.0, bump.y));
+  let slope = 1.0 - n.y;
+  let h = wp.y;
+
+  // grass
+  var col = grassTone(wp.xz, h);
+  // forest floor: darker, browner
+  col = mix(col, vec3f(0.04, 0.06, 0.025), splat.b * 0.6);
+  // fields and hay terraces around villages
+  // fields and hay terraces around villages: a patchwork, not a disc
+  let fld = vnoise(wp.xz * vec2f(0.025, 0.04) + vec2f(floor(h / 5.5) * 3.7, 0.0));
+  let fieldMask = smoothstep(0.35, 0.6, vnoise(wp.xz * 0.012 + 4.0));
+  let gt = grassTone(wp.xz, h);
+  let fieldCol = mix(gt * 1.2, gt * 0.85 + vec3f(0.025, 0.018, 0.0), step(0.55, fld));
+  col = mix(col, fieldCol, splat.g * fieldMask * 0.8 * smoothstep(0.12, 0.0, slope));
+
+  // rock: banded shale and limestone cliffs
+  let strataN = fbm(wp.xz * 0.006, 3);
+  let strataW = clamp(1.0 - dist / 1500.0, 0.0, 1.0);
+  let strata = mix(0.5, sin(wp.y * 0.11 + strataN * 24.0) * 0.5 + 0.5, strataW * 0.6);
+  let rockA = vec3f(0.16, 0.15, 0.14);
+  let rockB = vec3f(0.29, 0.26, 0.21);
+  var rock = mix(rockA, rockB, strata * 0.7 + vnoise(wp.xz * 0.05) * 0.3);
+  rock *= 0.75 + 0.5 * vnoise(wp.xz * 0.4 + wp.y * 0.1);
+  rock *= 0.6 + 0.8 * clamp(d1.x, 0.0, 1.0);
+  let rn = fbm(wp.xz * 0.012, 3);
+  let rockF = smoothstep(0.30, 0.44, slope + (rn - 0.5) * 0.2);
+  // scree just below cliffs
+  let screeF = smoothstep(0.22, 0.3, slope) * (1.0 - rockF) * smoothstep(0.5, 0.7, rn);
+  col = mix(col, vec3f(0.24, 0.225, 0.2) * (0.8 + 0.4 * vnoise(wp.xz * 0.9)), screeF * 0.6);
+  col = mix(col, rock, rockF);
+
+  // river gravel
+  let grav = mix(vec3f(0.42, 0.41, 0.38), vec3f(0.30, 0.29, 0.27), vnoise(wp.xz * 1.3));
+  col = mix(col, grav, splat.a);
+  // paths
+  col = mix(col, vec3f(0.15, 0.125, 0.09) * (0.85 + 0.3 * vnoise(wp.xz * 0.8)), splat.r * 0.85);
+
+  // snow: lower on gentle north faces, never on cliffs
+  let sn = fbm(wp.xz * 0.003, 4);
+  let line = u.horizon.w + (sn - 0.5) * 350.0 + n.z * 110.0;
+  let snowF = smoothstep(line - 60.0, line + 60.0, h) * smoothstep(0.42, 0.62, n.y + (sn - 0.5) * 0.3);
+  col = mix(col, vec3f(0.82, 0.85, 0.9), snowF);
+
+  var c = shade(col, n, sunVis, ao, 0.0);
+  // a touch of specular on snow
+  let v = normalize(u.camPos.xyz - wp);
+  let hv = normalize(v + u.sunDir.xyz);
+  c += u.sunColor.rgb * u.sunDir.w * pow(max(dot(n, hv), 0.0), 40.0) * 0.25 * snowF * sunVis;
+  return c;
+}
+`;
+
+export const TERRAIN = COMMON + TERRAIN_SHADE + /* wgsl */ `
+struct TOut {
+  @builtin(position) pos: vec4f,
+  @location(0) wp: vec3f,
+};
+
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> TOut {
+  let tile = ii >> 2u;
+  let lod = ii & 3u;
+  let q = 64u >> lod;
+  let stride = 1u << lod;
+  let tx = tile % 16u;
+  let tz = tile / 16u;
+  let qn = q + 1u;
+  var gi = 0u; var gj = 0u; var skirt = false;
+  if (vi < qn * qn) {
+    gi = vi % qn; gj = vi / qn;
+  } else {
+    let k = vi - qn * qn;
+    let side = k / q; let t = k % q;
+    skirt = true;
+    switch side {
+      case 0u: { gi = t; gj = 0u; }
+      case 1u: { gi = q; gj = t; }
+      case 2u: { gi = q - t; gj = q; }
+      default: { gi = 0u; gj = q - t; }
+    }
+  }
+  let X = tx * 64u + gi * stride;
+  let Z = tz * 64u + gj * stride;
+  var h = textureLoad(heightTex, vec2u(X, Z), 0).r;
+  if (skirt) {
+    let border = X == 0u || Z == 0u || X == 1024u || Z == 1024u;
+    h -= select(5.0 * f32(stride) + 3.0, 350.0, border);
+  }
+  let wp = vec3f(u.world.x + f32(X) * u.world.y, h, u.world.x + f32(Z) * u.world.y);
+  var o: TOut;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.wp = wp;
+  return o;
+}
+
+@fragment fn fs(in: TOut) -> @location(0) vec4f {
+  let uv = texUV(in.wp.xz);
+  let n = normalize(textureSampleLevel(normalTex, linSamp, uv, 0.0).xyz);
+  let splat = textureSampleLevel(splatTex, linSamp, uv, 0.0);
+  let lt = textureSampleLevel(lightTex, linSamp, uv, 0.0);
+  let dist = distance(in.wp, u.camPos.xyz);
+  var vis = lt.r;
+  if (dist < 600.0) { vis = min(vis, shadowMapVis(in.wp, n)); }
+  let c = terrainColor(in.wp, n, splat, vis, lt.g, dist);
+  return vec4f(applyFog(c, in.wp), 1.0);
+}
+`;
+
+// Distant ring of mountains beyond the playable area, shaped in the shader.
+export const FAR = COMMON + TERRAIN_SHADE + /* wgsl */ `
+struct FOut {
+  @builtin(position) pos: vec4f,
+  @location(0) wp: vec3f,
+  @location(1) n: vec3f,
+};
+fn ridgedF(p0: vec2f, oct: i32) -> f32 {
+  var p = p0; var s = 0.0; var a = 0.5; var w = 1.0;
+  for (var i = 0; i < oct; i++) {
+    var v = 1.0 - abs(vnoise(p) * 2.0 - 1.0);
+    v = v * v * w;
+    w = clamp(v * 1.8, 0.0, 1.0);
+    s += v * a;
+    a *= 0.5;
+    p = ROT * p * 2.07 + vec2f(3.7, 9.1);
+  }
+  return s;
+}
+fn farHeight(p: vec2f) -> f32 {
+  let half = u.world.w * 0.5;
+  let q = clamp(p, vec2f(-half), vec2f(half));
+  let o = length(p - q);
+  let edge = heightAt(q);
+  let south = smoothstep(-4000.0, 9000.0, p.y);
+  let rise = smoothstep(0.0, 3500.0, o);
+  let r = ridgedF(p * 0.00028 + vec2f(3.1, 1.7), 6);
+  let peaks = (700.0 + 2700.0 * south) * r + 500.0 * fbm(p * 0.0005, 3);
+  return mix(edge - 2.0, edge * 0.5 + 500.0 + peaks, rise);
+}
+@vertex fn vs(@location(0) xz: vec2f) -> FOut {
+  let h = farHeight(xz);
+  let wp = vec3f(xz.x, h, xz.y);
+  var o: FOut;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.wp = wp;
+  o.n = vec3f(0.0, 1.0, 0.0);
+  return o;
+}
+@fragment fn fs(in: FOut) -> @location(0) vec4f {
+  let dist = distance(in.wp, u.camPos.xyz);
+  let e = max(25.0, dist * 0.004);
+  let hx = farHeight(in.wp.xz + vec2f(e, 0.0)) - farHeight(in.wp.xz - vec2f(e, 0.0));
+  let hz = farHeight(in.wp.xz + vec2f(0.0, e)) - farHeight(in.wp.xz - vec2f(0.0, e));
+  let n = normalize(vec3f(-hx, 2.0 * e, -hz));
+  let c = terrainColor(in.wp, n, vec4f(0.0), 1.0, 0.6 + 0.4 * n.y, dist);
+  return vec4f(applyFog(c, in.wp), 1.0);
+}
+`;
+
+// ---- sky ---------------------------------------------------------------------
+export const SKY = COMMON + /* wgsl */ `
+struct SOut { @builtin(position) pos: vec4f, @location(0) ndc: vec2f };
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> SOut {
+  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+  var o: SOut;
+  o.pos = vec4f(p, 0.0, 1.0);
+  o.ndc = p;
+  return o;
+}
+
+// The main Caucasus range, far beyond the valley: a silhouette band drawn
+// into the sky, with snow on its crest.
+fn distantRange(d: vec3f) -> vec4f {
+  let az = atan2(d.x, -d.z);
+  let southness = 0.5 - 0.5 * cos(az);
+  var r = 0.0; var a = 0.5; var f = 3.0;
+  for (var i = 0; i < 5; i++) {
+    r += a * (1.0 - abs(vnoise(vec2f(az * f + 11.0, f32(i) * 7.0)) * 2.0 - 1.0));
+    a *= 0.5; f *= 2.1;
+  }
+  let crest = (0.012 + 0.05 * r * r) * (0.35 + 0.9 * southness) - 0.004;
+  if (d.y > crest) { return vec4f(0.0); }
+  let snow = smoothstep(crest - 0.025 - 0.01 * southness, crest - 0.004, d.y) * southness;
+  let base = mix(u.horizon.rgb * 0.82, vec3f(0.95, 0.96, 1.0) * (u.sunColor.rgb * u.sunDir.w * 0.35 + u.zenith.rgb * 0.6), snow * 0.7);
+  return vec4f(base, 1.0);
+}
+
+fn clouds(ro: vec3f, d: vec3f) -> vec4f {
+  if (d.y < 0.01) { return vec4f(0.0); }
+  let H = 5200.0;
+  let t = (H - ro.y) / d.y;
+  let p = ro.xz + d.xz * t;
+  let time = u.camPos.w;
+  let q = p * 0.00022 + vec2f(time * 0.0018, time * 0.0006);
+  var dens = fbm(q, 6);
+  let cover = u.camFwd.w;
+  dens = smoothstep(1.0 - cover, 1.0 - cover + 0.32, dens);
+  if (dens <= 0.0) { return vec4f(0.0); }
+  let ls = fbm(q + u.sunDir.xz * 0.05, 4);
+  let lit = clamp(1.0 - (smoothstep(1.0 - cover, 1.0, ls) - dens * 0.3) * 1.2, 0.2, 1.0);
+  let sd = max(dot(d, u.sunDir.xyz), 0.0);
+  var c = mix(u.zenith.rgb * 0.8 + u.horizon.rgb * 0.4, u.sunColor.rgb * u.sunDir.w * 0.55 + u.horizon.rgb * 0.3, lit);
+  c += u.glow.rgb * u.skySun.w * pow(max(dot(d, u.skySun.xyz), 0.0), 8.0) * 0.6 * (1.0 - dens);
+  c += vec3f(0.6, 0.66, 0.85) * u.moon.w * pow(max(dot(d, u.moon.xyz), 0.0), 30.0) * 0.25;
+  let fade = 1.0 - smoothstep(20000.0, 90000.0, t);
+  return vec4f(c, dens * fade * 0.92);
+}
+
+fn stars(d: vec3f) -> vec3f {
+  if (u.glow.w <= 0.0 || d.y < 0.0) { return vec3f(0.0); }
+  let az = atan2(d.x, -d.z);
+  let el = asin(clamp(d.y, -1.0, 1.0));
+  let g = vec2f(az * 95.0, el * 95.0);
+  let cell = floor(g);
+  let h = hashI(vec2i(cell) + vec2i(911, 37));
+  if (h < 0.965) { return vec3f(0.0); }
+  let jit = vec2f(hashI(vec2i(cell) + vec2i(3, 7)), hashI(vec2i(cell) + vec2i(17, 5))) * 0.6 + 0.2;
+  let dist = length((g - cell - jit) * vec2f(cos(el), 1.0));
+  let b = pow((h - 0.965) / 0.035, 3.0);
+  let tw = 0.75 + 0.25 * sin(u.camPos.w * (2.0 + h * 9.0) + h * 80.0);
+  let tint = mix(vec3f(0.75, 0.82, 1.0), vec3f(1.0, 0.9, 0.75), fract(h * 91.0));
+  return tint * smoothstep(0.16, 0.0, dist) * (0.03 + 0.4 * b) * tw * u.glow.w * smoothstep(0.0, 0.25, d.y);
+}
+
+// The moon: a large, bright disk with maria and a darkened limb.
+fn moonDisk(d: vec3f) -> vec4f {
+  if (u.moon.w <= 0.0) { return vec4f(0.0); }
+  let m = u.moon.xyz;
+  let R = 0.024;
+  let right = normalize(cross(m, vec3f(0.0, 1.0, 0.0)));
+  let up = cross(right, m);
+  let q = vec2f(dot(d, right), dot(d, up)) / R;
+  let r = length(q);
+  if (r > 1.02 || dot(d, m) < 0.0) { return vec4f(0.0); }
+  let z = sqrt(max(1.0 - r * r, 0.0));
+  let maria = smoothstep(0.46, 0.6, fbm(q * 1.3 + vec2f(2.3, 7.1), 4));
+  var alb = mix(1.0, 0.42, maria);
+  alb *= 0.9 + 0.1 * vnoise(q * 18.0);
+  let crater = smoothstep(0.75, 0.9, vnoise(q * 7.0 + 11.0)) * 0.12;
+  alb -= crater;
+  let col = vec3f(1.0, 0.97, 0.9) * alb * (0.62 + 0.38 * z) * u.moon.w * 0.75;
+  return vec4f(col, smoothstep(1.02, 0.98, r));
+}
+
+@fragment fn fs(in: SOut) -> @location(0) vec4f {
+  let d = normalize(u.camFwd.xyz + in.ndc.x * u.camRight.w * u.camRight.xyz + in.ndc.y * u.camUp.w * u.camUp.xyz);
+  var c = skyColor(d, true);
+  c += stars(d);
+  let mo = moonDisk(d);
+  c = mix(c, mo.rgb, mo.a);
+  let cl = clouds(u.camPos.xyz, d);
+  c = mix(c, cl.rgb, cl.a);
+  let m = distantRange(d);
+  if (m.a > 0.0) {
+    let hz = skyColor(vec3f(d.x, 0.02, d.z), false);
+    c = mix(m.rgb, hz, 0.45);
+  }
+  return vec4f(c, 1.0);
+}
+`;
+
+// ---- instanced objects: towers, crypts, trees, rocks, sheep -------------------
+const OBJ_COMMON = /* wgsl */ `
+struct OIn {
+  @location(0) pos: vec3f,
+  @location(1) nrm: vec4f,
+  @location(2) col: vec4f,
+  @location(3) i0: vec4f, // x, y, z, rotation
+  @location(4) i1: vec4f, // scale xz, scale y, colour seed, unused
+};
+struct OOut {
+  @builtin(position) pos: vec4f,
+  @location(0) wp: vec3f,
+  @location(1) n: vec3f,
+  @location(2) col: vec4f,
+  @location(3) lp: vec3f,
+  @location(4) seed: f32,
+};
+
+fn objWorld(v: OIn) -> array<vec3f, 2> {
+  let mat = u32(round(v.col.a * 255.0));
+  var p = v.pos * vec3f(v.i1.x, v.i1.y, v.i1.x);
+  let camD = distance(v.i0.xz, u.camPos.xz);
+  let shrink = 1.0 - smoothstep(u.params.z * 0.8, u.params.z, camD);
+  if (mat == 1u) {
+    let t = u.camPos.w;
+    let ph = v.i0.x * 0.13 + v.i0.z * 0.07;
+    let sw = (sin(t * 1.1 + ph) + 0.5 * sin(t * 2.7 + ph * 1.7)) * 0.012 * max(p.y, 0.0);
+    p.x += sw; p.z += sw * 0.6;
+  }
+  if (v.i1.w > 0.5) { p *= shrink; }
+  let c = cos(v.i0.w); let s = sin(v.i0.w);
+  let r = vec3f(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+  var n = v.nrm.xyz / vec3f(v.i1.x, v.i1.y, v.i1.x);
+  n = vec3f(c * n.x + s * n.z, n.y, -s * n.x + c * n.z);
+  return array<vec3f, 2>(r + v.i0.xyz, normalize(n));
+}
+`;
+
+export const OBJECTS = COMMON + OBJ_COMMON + /* wgsl */ `
+@vertex fn vs(v: OIn) -> OOut {
+  let w = objWorld(v);
+  var o: OOut;
+  o.pos = u.viewProj * vec4f(w[0], 1.0);
+  o.wp = w[0];
+  o.n = w[1];
+  o.col = v.col;
+  o.lp = v.pos;
+  o.seed = v.i1.z;
+  return o;
+}
+
+// Sheep: graze with the head down, nibbling, then walk a few steps to fresh
+// grass. Walking time accumulates only while walking, so the path is smooth.
+@vertex fn vs_sheep(v: OIn) -> OOut {
+  let t = u.camPos.w;
+  let seed = v.i1.z;
+  let T = 11.0 + seed * 9.0;
+  let Tw = 2.6 + seed * 1.5;
+  let cyc = (t + seed * 97.0) / T;
+  let k = floor(cyc);
+  let f = fract(cyc) * T;
+  let walkT = k * Tw + clamp(f - (T - Tw), 0.0, Tw);
+  let walking = smoothstep(T - Tw - 0.5, T - Tw + 0.3, f) * (1.0 - smoothstep(T - 0.3, T, f));
+  let a = walkT * 0.11 + seed * 6.283;
+  let R = 5.0 + seed * 7.0;
+  let off = vec2f(sin(a), sin(a * 0.7 + 1.3)) * R;
+  let dir = vec2f(cos(a), 0.7 * cos(a * 0.7 + 1.3));
+  let heading = atan2(dir.x, dir.y);
+  let xz = v.i0.xz + off;
+  let y = heightAt(xz);
+  var p = v.pos;
+  let mat = u32(round(v.col.a * 255.0));
+  if (mat == 7u && p.y > 0.46 && p.z > 0.45) {
+    // the head pivots down to the grass
+    let graze = 1.0 - walking;
+    let ang = graze * (1.1 + 0.12 * sin(t * 6.0 + seed * 40.0)) + walking * 0.05 * sin(t * 9.0);
+    let pv = vec3f(0.0, 0.66, 0.45);
+    let q = p - pv;
+    let c = cos(ang); let s = sin(ang);
+    p = vec3f(q.x, q.y * c - q.z * s, q.y * s + q.z * c) + pv;
+  } else if (mat == 7u && p.y < 0.46) {
+    // legs swing while walking
+    let side = select(-1.0, 1.0, p.x * p.z > 0.0);
+    p.z += sin(t * 10.0 + seed * 20.0) * 0.13 * walking * side * (1.0 - p.y / 0.46);
+  } else {
+    p.y += walking * 0.025 * abs(sin(t * 10.0 + seed * 20.0));
+  }
+  p *= vec3f(v.i1.x, v.i1.y, v.i1.x);
+  let c = cos(heading); let s = sin(heading);
+  let wp = vec3f(c * p.x + s * p.z, p.y, -s * p.x + c * p.z) + vec3f(xz.x, y - 0.03, xz.y);
+  let n0 = v.nrm.xyz;
+  var o: OOut;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.wp = wp;
+  o.n = normalize(vec3f(c * n0.x + s * n0.z, n0.y, -s * n0.x + c * n0.z));
+  o.col = v.col;
+  o.lp = v.pos;
+  o.seed = seed;
+  return o;
+}
+
+@vertex fn vs_shadow(v: OIn) -> @builtin(position) vec4f {
+  let w = objWorld(v);
+  return u.shadowMat * vec4f(w[0], 1.0);
+}
+
+// Coursed rubble masonry, laid in the face's own coordinates: wavy courses
+// of uneven stones bedded in pale lime mortar.
+fn masonry(wp: vec3f, n: vec3f, dist: f32) -> vec2f {
+  if (abs(n.y) > 0.6) { return vec2f(1.0, hash21(floor(wp.xz * 1.3))); }
+  let t = normalize(vec3f(-n.z, 0.0, n.x));
+  let uu = dot(wp, t);
+  let course = 0.42;
+  let yy = wp.y / course + (vnoise(vec2f(uu * 0.35, wp.y * 0.2)) - 0.5) * 0.7;
+  let row = floor(yy);
+  let x = uu + hash11(row * 1.37 + 0.5) * 3.1;
+  let len = 0.55 + 0.75 * hash11(row * 7.1 + floor(x / 1.3));
+  let cell = floor(x / len);
+  let fx = fract(x / len);
+  let fy = fract(yy);
+  let id = hash21(vec2f(cell, row));
+  let edge = min(min(fx, 1.0 - fx) * len, min(fy, 1.0 - fy) * course);
+  let fw = clamp(dist * 0.004, 0.0, 1.0);
+  let mortar = smoothstep(0.01, 0.06 + fw * 0.2, edge);
+  return vec2f(mix(mortar, 1.0, fw * 0.85), id);
+}
+
+@fragment fn fs(in: OOut) -> @location(0) vec4f {
+  var n = normalize(in.n);
+  let mat = u32(round(in.col.a * 255.0));
+  var albedo = in.col.rgb;
+  var wrap = 0.0;
+  var ao = 1.0;
+  let dist = distance(in.wp, u.camPos.xyz);
+  let lt = terrainLight(in.wp.xz);
+  let above = in.wp.y - heightAt(in.wp.xz);
+  let groundAO = mix(lt.g, 1.0, smoothstep(0.0, 25.0, above));
+  var spec = 0.0;
+
+  if (mat == 0u || mat == 5u) {
+    // stone walls (0) and slate roof slabs (5)
+    let m = masonry(in.wp, n, dist);
+    let stoneC = albedo * (0.78 + 0.4 * m.y) * mix(vec3f(1.0), vec3f(1.06, 1.0, 0.9), fract(m.y * 7.0));
+    let mortarC = albedo * 1.12 + vec3f(0.015);
+    albedo = mix(mortarC, stoneC, m.x);
+    albedo *= 0.9 + 0.2 * vnoise(in.wp.xz * 0.7 + in.wp.y * 0.9);
+    // weathering streaks and lichen
+    let streak = vnoise(vec2f(dot(in.wp.xz, vec2f(0.7, 0.7)) * 3.0, in.wp.y * 0.08));
+    albedo *= 0.88 + 0.16 * streak;
+    let lichen = smoothstep(0.62, 0.8, vnoise(in.wp.xz * 1.7 + in.wp.y * 1.3)) * 0.4;
+    albedo = mix(albedo, vec3f(0.42, 0.40, 0.22), lichen * 0.5);
+    ao = groundAO * (0.7 + 0.3 * smoothstep(0.0, 2.5, above));
+  } else if (mat == 1u) {
+    // foliage
+    let s = in.seed;
+    albedo *= 0.8 + 0.4 * vnoise(in.wp.xz * 0.9 + in.wp.y * 1.3);
+    albedo = mix(albedo, albedo * vec3f(1.25, 1.05, 0.7), fract(s * 7.3) * 0.5);
+    wrap = 0.5;
+    ao = groundAO * (0.45 + 0.55 * clamp(in.lp.y / 9.0, 0.0, 1.0)) * (0.75 + 0.25 * dot(normalize(in.lp - vec3f(0.0, in.lp.y, 0.0) + vec3f(0.0001)), in.n));
+    ao = clamp(ao, 0.25, 1.0);
+  } else if (mat == 2u) {
+    // bark; birches get pale bark from their seed
+    if (fract(in.seed * 13.7) > 0.5) {
+      let ring = step(0.82, vnoise(vec2f(in.wp.y * 6.0, atan2(in.n.x, in.n.z) * 2.0)));
+      albedo = mix(vec3f(0.78, 0.76, 0.70), vec3f(0.08, 0.07, 0.06), ring);
+    }
+    ao = groundAO * 0.8;
+  } else if (mat == 3u) {
+    // dark openings: windows, doors, loopholes
+    albedo = vec3f(0.018, 0.015, 0.012);
+  } else if (mat == 4u) {
+    // natural rock
+    let s = in.seed;
+    let st = sin(in.wp.y * 1.7 + vnoise(in.wp.xz * 0.3) * 5.0) * 0.5 + 0.5;
+    albedo *= (0.9 + 0.12 * st) * (0.75 + 0.5 * vnoise(in.wp.xz * 1.3 + in.wp.y * 0.7));
+    albedo *= 0.85 + 0.3 * fract(s * 3.1);
+    let moss = smoothstep(0.55, 0.9, n.y) * smoothstep(0.4, 0.7, vnoise(in.wp.xz * 0.8));
+    albedo = mix(albedo, vec3f(0.17, 0.2, 0.08), moss * 0.7);
+    ao = groundAO * (0.55 + 0.45 * smoothstep(0.0, 2.0, above));
+  } else if (mat == 6u) {
+    albedo *= 0.85 + 0.25 * vnoise(in.wp.xz * 9.0 + in.wp.y * 9.0);
+    wrap = 0.4;
+    ao = 0.85;
+  }
+
+  let vis = objectSunVis(in.wp, n);
+  var c = shade(albedo, n, vis, ao, wrap);
+  if (mat == 1u) {
+    // light through leaves
+    let v = normalize(in.wp - u.camPos.xyz);
+    let bl = pow(max(dot(v, u.sunDir.xyz), 0.0), 4.0);
+    c += albedo * u.sunColor.rgb * u.sunDir.w * bl * 0.6 * vis;
+  }
+  return vec4f(applyFog(c, in.wp), 1.0);
+}
+`;
+
+// Eagles circling the gorge: wing flap and banking done here.
+export const BIRDS = COMMON + OBJ_COMMON + /* wgsl */ `
+@vertex fn vs(v: OIn) -> OOut {
+  let t = u.camPos.w;
+  let center = v.i0.xyz;
+  let radius = v.i1.x * (1.0 + 0.3 * sin(t * 0.05 + v.i0.w * 3.0));
+  let speed = v.i1.y;
+  let ph = v.i0.w + t * speed;
+  let dirS = select(-1.0, 1.0, v.i1.z > 0.5);
+  let a = ph * dirS;
+  let pos = center + vec3f(cos(a) * radius, sin(t * 0.13 + v.i0.w) * 14.0, sin(a) * radius);
+  let fwd = normalize(vec3f(-sin(a), 0.0, cos(a)) * dirS);
+  let right = normalize(cross(fwd, vec3f(0.0, 1.0, 0.0)));
+  let bank = 0.35 * dirS;
+  var p = v.pos;
+  let mat = u32(round(v.col.a * 255.0));
+  // flap: wings beat in bursts, then glide
+  let burst = smoothstep(0.6, 0.9, sin(t * 0.37 + v.i0.w * 3.0));
+  let flap = sin(t * 7.0 + v.i0.w) * 0.55 * burst + 0.08;
+  let span = abs(p.x);
+  if (span > 0.15) { p.y += span * flap; }
+  let s = 1.0;
+  let up = normalize(vec3f(0.0, 1.0, 0.0) * cos(bank) + right * sin(bank));
+  let rr = normalize(cross(up, fwd));
+  let wp = pos + (rr * p.x + up * p.y + fwd * p.z) * s * 1.8;
+  let n = normalize(rr * v.nrm.x + up * v.nrm.y + fwd * v.nrm.z);
+  var o: OOut;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.wp = wp; o.n = n; o.col = v.col; o.lp = v.pos; o.seed = 0.0;
+  return o;
+}
+@fragment fn fs(in: OOut) -> @location(0) vec4f {
+  let n = normalize(in.n);
+  let c = shade(in.col.rgb, n * sign(dot(n, u.camPos.xyz - in.wp) + 1e-4), 1.0, 1.0, 0.3);
+  return vec4f(applyFog(c, in.wp), 1.0);
+}
+`;
+
+// ---- grass: tufts generated around the camera, no instance buffer ---------------
+export const GRASS = COMMON + TERRAIN_SHADE + /* wgsl */ `
+struct GOut {
+  @builtin(position) pos: vec4f,
+  @location(0) wp: vec3f,
+  @location(1) n: vec3f,
+  @location(2) col: vec3f,
+  @location(3) tip: f32,
+};
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> GOut {
+  var o: GOut;
+  o.pos = vec4f(0.0, 0.0, -2.0, 1.0);
+  let G = u32(u.grass.w);
+  let gx = ii % G; let gz = ii / G;
+  let cellF = vec2f(f32(gx), f32(gz));
+  let base = vec2f(u.grass.x, u.grass.y) + cellF * u.grass.z;
+  let cellId = vec2i(floor(base / u.grass.z + 0.5));
+  let r1 = hashI(cellId);
+  let r2 = hashI(cellId + vec2i(71, 13));
+  let r3 = hashI(cellId + vec2i(-31, 97));
+  let xz = base + (vec2f(r1, r2) - 0.5) * u.grass.z;
+  let dist = distance(xz, u.camPos.xz);
+  let R = u.params.x;
+  if (dist > R) { return o; }
+  let uv = texUV(xz);
+  let n = normalize(textureSampleLevel(normalTex, linSamp, uv, 0.0).xyz);
+  let splat = textureSampleLevel(splatTex, linSamp, uv, 0.0);
+  let h = heightAt(xz);
+  let rockN = fbm(xz * 0.012, 3);
+  let slope = 1.0 - n.y;
+  let cover = (1.0 - smoothstep(0.27, 0.38, slope + (rockN - 0.5) * 0.2))
+            * (1.0 - smoothstep(0.3, 0.7, splat.r)) * (1.0 - smoothstep(0.2, 0.6, splat.a))
+            * (1.0 - smoothstep(u.horizon.w - 600.0, u.horizon.w - 250.0, h))
+            * (1.0 - splat.b * 0.6);
+  if (r3 > cover) { return o; }
+  let lenScale = (1.0 - smoothstep(R * 0.55, R, dist)) * (0.55 + 0.6 * vnoise(xz * 0.15)) * (1.0 - 0.5 * splat.g);
+  if (lenScale < 0.02) { return o; }
+
+  // tuft: 3 blades, each 3 triangles (9 vertices)
+  let blade = vi / 9u;
+  let k = vi % 9u;
+  // blade strip vertices: 0,1 base; 2,3 middle; 4 tip
+  var idx = array<u32, 9>(0u, 1u, 2u, 1u, 3u, 2u, 2u, 3u, 4u);
+  let sv = idx[k];
+  let lvl = f32(sv / 2u) * 0.5;
+  let side = select(-1.0, 1.0, (sv & 1u) == 1u);
+  let bh = hashI(cellId * 3 + vec2i(i32(blade), 5));
+  let ang = (f32(blade) * 2.1 + r1 * 6.28);
+  let bdir = vec2f(cos(ang), sin(ang));
+  let width = 0.032 * (1.0 - lvl * 0.9) * (0.8 + 0.4 * bh);
+  let height = (0.25 + 0.4 * bh) * lenScale;
+  let t = u.camPos.w;
+  let wind = sin(t * 1.7 + xz.x * 0.11 + xz.y * 0.07) * 0.5 + sin(t * 3.1 + xz.x * 0.4) * 0.2 + 0.4;
+  let lean = (0.15 + bh * 0.25 + wind * 0.25) * lvl * lvl * height;
+  let off = vec2f(-bdir.y, bdir.x) * side * width + bdir * (lean + (bh - 0.5) * 0.12);
+  let wp = vec3f(xz.x + off.x, h + lvl * height - 0.03, xz.y + off.y);
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.wp = wp;
+  o.n = normalize(n + vec3f(bdir.x, 0.0, bdir.y) * 0.25);
+  var gc = grassTone(xz, h);
+  gc = mix(gc, vec3f(0.2, 0.16, 0.07), splat.g * 0.6);
+  // a few alpine flowers
+  let fl = hashI(cellId + vec2i(5, 211));
+  if (fl < 0.06 && blade == 0u && lvl > 0.9) {
+    let pick = fract(fl * 53.0);
+    gc = select(select(select(vec3f(0.9, 0.75, 0.1), vec3f(0.5, 0.25, 0.75), pick > 0.35),
+               vec3f(0.92, 0.92, 0.88), pick > 0.6), vec3f(0.8, 0.15, 0.12), pick > 0.85);
+  }
+  o.col = gc;
+  o.tip = lvl;
+  return o;
+}
+@fragment fn fs(in: GOut) -> @location(0) vec4f {
+  let n = normalize(in.n);
+  let lt = terrainLight(in.wp.xz);
+  let vis = min(lt.r, shadowMapVis(in.wp, n));
+  let col = in.col * (0.75 + 0.3 * in.tip);
+  var c = shade(col, n, vis, lt.g * (0.6 + 0.4 * in.tip), 0.3);
+  let v = normalize(in.wp - u.camPos.xyz);
+  c += col * u.sunColor.rgb * u.sunDir.w * pow(max(dot(v, u.sunDir.xyz), 0.0), 3.0) * 0.5 * in.tip * vis;
+  return vec4f(applyFog(c, in.wp), 1.0);
+}
+`;
+
+// ---- rivers ----------------------------------------------------------------------
+export const WATER = COMMON + /* wgsl */ `
+struct WIn { @location(0) pos: vec3f, @location(1) uv: vec2f, @location(2) flow: f32 };
+struct WOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) uv: vec2f, @location(2) flow: f32 };
+@vertex fn vs(v: WIn) -> WOut {
+  var o: WOut;
+  o.pos = u.viewProj * vec4f(v.pos, 1.0);
+  o.wp = v.pos; o.uv = v.uv; o.flow = v.flow;
+  return o;
+}
+@fragment fn fs(in: WOut) -> @location(0) vec4f {
+  let t = u.camPos.w;
+  let speed = 1.5 + in.flow * 3.0;
+  let p = vec2f(in.uv.x * 2.0, in.uv.y * 0.12 - t * speed * 0.12);
+  let a = fbmD(p * vec2f(1.0, 1.0), 4);
+  let b = fbmD(p * vec2f(2.3, 3.1) + vec2f(5.0, -t * 0.4), 3);
+  let ripple = (a.yz + b.yz * 0.5) * (0.35 + in.flow * 0.6);
+  let n = normalize(vec3f(ripple.x, 1.0, ripple.y));
+  let v = normalize(u.camPos.xyz - in.wp);
+  let fres = 0.03 + 0.97 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
+  let r = reflect(-v, n);
+  let refl = skyColor(normalize(vec3f(r.x, abs(r.y), r.z)), false);
+  let lt = terrainLight(in.wp.xz);
+  let vis = min(lt.r, shadowMapVis(in.wp, vec3f(0.0, 1.0, 0.0)));
+  // glacial water: milky grey-turquoise
+  let body = vec3f(0.11, 0.17, 0.17) * (ambient(vec3f(0.0, 1.0, 0.0)) + u.sunColor.rgb * u.sunDir.w * 0.35 * vis);
+  var c = mix(body, refl, fres * 0.85);
+  // white water on steep reaches and at the banks
+  let edge = 1.0 - abs(in.uv.x * 2.0 - 1.0);
+  let foamN = fbm(vec2f(in.uv.x * 6.0, in.uv.y * 0.35 - t * speed * 0.35), 4);
+  let foam = smoothstep(0.62 - in.flow * 0.35, 0.8, foamN + (1.0 - smoothstep(0.0, 0.25, edge)) * 0.3);
+  c = mix(c, vec3f(0.85, 0.88, 0.88) * (ambient(vec3f(0.0, 1.0, 0.0)) + u.sunColor.rgb * u.sunDir.w * vis * 0.8), foam * 0.75);
+  let hv = normalize(v + u.sunDir.xyz);
+  c += u.sunColor.rgb * u.sunDir.w * pow(max(dot(n, hv), 0.0), 120.0) * 3.0 * vis;
+  return vec4f(applyFog(c, in.wp), 1.0);
+}
+`;
+
+// ---- light compute: soft terrain shadows, shadow heights and ambient occlusion -----
+export const LIGHT_CS = /* wgsl */ `
+struct L { sun: vec4f, world: vec4f };
+@group(0) @binding(0) var<uniform> l: L;
+@group(0) @binding(1) var heightTex: texture_2d<f32>;
+@group(0) @binding(2) var outTex: texture_storage_2d<rgba16float, write>;
+fn H(p: vec2f) -> f32 {
+  let n = l.world.z;
+  let g = clamp(p, vec2f(0.0), vec2f(n - 1.001));
+  let i = vec2i(floor(g));
+  let f = g - floor(g);
+  let a = textureLoad(heightTex, i, 0).r;
+  let b = textureLoad(heightTex, i + vec2i(1, 0), 0).r;
+  let c = textureLoad(heightTex, i + vec2i(0, 1), 0).r;
+  let d = textureLoad(heightTex, i + vec2i(1, 1), 0).r;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let n = u32(l.world.z);
+  if (id.x >= n || id.y >= n) { return; }
+  let cell = l.world.y;
+  let p0 = vec2f(id.xy);
+  let h0 = textureLoad(heightTex, vec2i(id.xy), 0).r + 0.5;
+  let sd = normalize(l.sun.xz);
+  let tanS = l.sun.y / max(length(l.sun.xz), 1e-4);
+  var maxRise = -1e9;
+  var minMargin = 1e9;
+  var dist = 0.6;
+  for (var i = 0; i < 140; i++) {
+    let p = p0 + sd * dist;
+    if (any(p < vec2f(0.0)) || any(p > vec2f(l.world.z - 1.0))) { break; }
+    let hs = H(p);
+    let dm = dist * cell;
+    let rise = hs - (h0 + dm * tanS);
+    maxRise = max(maxRise, rise);
+    minMargin = min(minMargin, -rise / dm);
+    dist = dist * 1.045 + 0.4;
+  }
+  // penumbra: soft over a small angular band
+  let surf = smoothstep(-0.012, 0.03, minMargin);
+  // ambient occlusion from the horizon in 8 directions
+  var occ = 0.0;
+  for (var k = 0; k < 8; k++) {
+    let a = f32(k) * 0.785398 + 0.39;
+    let dir = vec2f(cos(a), sin(a));
+    var hor = 0.0;
+    var dd = 1.0;
+    for (var s = 0; s < 14; s++) {
+      let p = p0 + dir * dd;
+      let dh = H(p) - h0;
+      hor = max(hor, dh / (dd * cell));
+      dd = dd * 1.35 + 0.5;
+    }
+    occ += sin(atan(hor));
+  }
+  let ao = clamp(1.0 - occ / 8.0 * 1.1, 0.0, 1.0);
+  textureStore(outTex, vec2i(id.xy), vec4f(surf, ao, max(maxRise, 0.0), 0.0));
+}
+`;
+
+// ---- final composite ---------------------------------------------------------------
+export const POST = /* wgsl */ `
+struct P { exposure: vec4f };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var hdr: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+  let q = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
+  var o: VOut;
+  o.pos = vec4f(q * 2.0 - 1.0, 0.0, 1.0);
+  o.uv = vec2f(q.x, 1.0 - q.y);
+  return o;
+}
+fn aces(x: vec3f) -> vec3f {
+  let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+  var c = textureSampleLevel(hdr, samp, in.uv, 0.0).rgb * p.exposure.x;
+  let l = dot(c, vec3f(0.2126, 0.7152, 0.0722));
+  c = mix(vec3f(l), c, 1.08);
+  c = aces(c);
+  // gentle warm grade and vignette
+  c = pow(c, vec3f(1.0 / 2.2));
+  let d = in.uv - 0.5;
+  c *= 1.0 - dot(d, d) * 0.45;
+  c *= p.exposure.y;
+  // dither to kill banding in the sky
+  let n = fract(sin(dot(in.pos.xy, vec2f(12.9898, 78.233))) * 43758.5453);
+  c += (n - 0.5) / 255.0;
+  return vec4f(c, 1.0);
+}
+`;

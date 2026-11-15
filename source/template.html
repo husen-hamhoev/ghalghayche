@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ghalghaiche</title>
+<meta name="description" content="A procedural WebGPU flight through the mountains, gorges and stone towers of Ingushetia.">
+<style>
+  :root {
+    --ink: #f3ece0;
+    --dim: rgba(243, 236, 224, 0.62);
+    --stone: #c9b48f;
+    --panel: rgba(18, 16, 14, 0.72);
+    --line: rgba(243, 236, 224, 0.16);
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0d0c0b; color: var(--ink); overflow: hidden; font-family: var(--sans); }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; cursor: crosshair; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+
+  #loader {
+    position: fixed; inset: 0; display: grid; place-items: center; z-index: 10;
+    background: radial-gradient(120% 90% at 50% 100%, #3a2f26 0%, #16130f 55%, #0b0a09 100%);
+    transition: opacity 1.4s ease, visibility 1.4s;
+  }
+  #loader.gone { opacity: 0; visibility: hidden; }
+  .card { width: min(560px, calc(100vw - 32px)); text-align: center; }
+  .tower { width: 46px; height: auto; opacity: 0.85; margin-bottom: 18px; }
+  h1 { font-family: var(--serif); font-weight: 400; font-size: clamp(40px, 9vw, 72px); letter-spacing: 0.02em; margin: 0; line-height: 1; }
+  .latin { font-family: var(--serif); font-style: italic; color: var(--stone); font-size: clamp(17px, 3.6vw, 21px); margin: 10px 0 0; }
+  .lede { color: var(--dim); font-size: 14px; line-height: 1.6; margin: 18px auto 0; max-width: 420px; }
+  .track { height: 2px; background: var(--line); margin: 30px auto 0; width: 220px; overflow: hidden; border-radius: 2px; }
+  #bar { height: 100%; width: 0; background: var(--stone); transition: width 0.3s ease; }
+  #status { margin-top: 10px; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); min-height: 1.2em; }
+  #enter {
+    margin-top: 22px; padding: 12px 34px; border-radius: 999px; border: 1px solid var(--stone);
+    background: transparent; letter-spacing: 0.14em; text-transform: uppercase; font-size: 13px;
+    transition: background 0.2s, color 0.2s;
+  }
+  #enter:hover, #enter:focus-visible { background: var(--stone); color: #16130f; outline: none; }
+  .keys { margin-top: 26px; font-size: 12px; color: var(--dim); line-height: 1.9; }
+  kbd { font-family: var(--sans); font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; color: var(--ink); }
+
+  #menu {
+    position: fixed; inset: 0; z-index: 8; display: grid; place-items: center;
+    background: rgba(8, 7, 6, 0.45); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  #menu[hidden], #nogpu[hidden], #enter[hidden], #stats[hidden] { display: none; }
+  .panel {
+    width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px 24px 20px;
+  }
+  .panel h2 { font-family: var(--serif); font-weight: 400; font-size: 28px; margin: 0 0 2px; }
+  .panel .latin { margin: 0 0 18px; font-size: 15px; }
+  .label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); margin: 16px 0 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .row button, #sound {
+    flex: 1 1 auto; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: transparent; font-size: 13px;
+  }
+  .row button.on { background: var(--stone); color: #16130f; border-color: var(--stone); }
+  .row button:hover:not(.on), #sound:hover { border-color: var(--stone); }
+  #views { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #views button { text-align: left; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: transparent; font-size: 13px; }
+  #views button:hover { border-color: var(--stone); }
+  #views b { color: var(--stone); font-weight: 600; margin-right: 6px; }
+  #resume { width: 100%; margin-top: 20px; padding: 11px; border-radius: 999px; border: 1px solid var(--stone); background: var(--stone); color: #16130f; letter-spacing: 0.12em; text-transform: uppercase; font-size: 12px; }
+  .help { font-size: 12px; color: var(--dim); line-height: 1.9; margin-top: 4px; }
+
+  #caption {
+    position: fixed; left: max(16px, 4vw); bottom: max(20px, 6vh); z-index: 5; pointer-events: none;
+    opacity: 0; transform: translateY(8px); transition: opacity 1.2s ease, transform 1.2s ease;
+    text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55);
+  }
+  #caption.show { opacity: 1; transform: none; }
+  #cap-num { font-size: 11px; letter-spacing: 0.2em; color: var(--stone); }
+  #cap-name { font-family: var(--serif); font-size: clamp(28px, 5vw, 44px); line-height: 1.1; }
+  #cap-sub { font-size: 14px; color: var(--ink); opacity: 0.85; margin-top: 4px; max-width: min(460px, calc(100vw - 32px)); }
+
+  #hint {
+    position: fixed; right: 16px; bottom: 16px; z-index: 5; font-size: 12px; color: var(--dim);
+    opacity: 0; transition: opacity 1s; pointer-events: none; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+  }
+  #hint.show { opacity: 1; }
+  #stats {
+    position: fixed; left: 12px; top: 12px; z-index: 6; white-space: pre; font: 11px/1.5 ui-monospace, Menlo, monospace;
+    background: rgba(0, 0, 0, 0.45); padding: 8px 10px; border-radius: 6px; pointer-events: none;
+  }
+  /* on-screen controls for touch screens */
+  #touch[hidden] { display: none; }
+  #touch { position: fixed; inset: 0; z-index: 6; pointer-events: none; }
+  #touch > * { pointer-events: auto; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  #stick {
+    position: absolute; left: calc(20px + env(safe-area-inset-left)); bottom: calc(24px + env(safe-area-inset-bottom));
+    width: 128px; height: 128px; border-radius: 50%;
+    background: rgba(18, 16, 14, 0.28); border: 1px solid rgba(243, 236, 224, 0.28);
+    display: grid; place-items: center;
+  }
+  #knob { width: 54px; height: 54px; border-radius: 50%; background: rgba(243, 236, 224, 0.5); box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
+  .tbtn {
+    position: absolute; width: 56px; height: 56px; border-radius: 50%;
+    background: rgba(18, 16, 14, 0.32); border: 1px solid rgba(243, 236, 224, 0.3); color: var(--ink);
+    font-size: 20px; line-height: 1; display: grid; place-items: center; padding: 0;
+  }
+  .tbtn.on { background: var(--stone); color: #16130f; border-color: var(--stone); }
+  #t-up { right: calc(22px + env(safe-area-inset-right)); bottom: calc(100px + env(safe-area-inset-bottom)); }
+  #t-down { right: calc(22px + env(safe-area-inset-right)); bottom: calc(30px + env(safe-area-inset-bottom)); }
+  #t-fast { right: calc(90px + env(safe-area-inset-right)); bottom: calc(30px + env(safe-area-inset-bottom)); font-size: 18px; }
+  #t-menu { right: calc(16px + env(safe-area-inset-right)); top: calc(16px + env(safe-area-inset-top)); width: 46px; height: 46px; font-size: 20px; }
+  #t-tour { right: calc(72px + env(safe-area-inset-right)); top: calc(16px + env(safe-area-inset-top)); width: auto; height: 46px; padding: 0 16px; border-radius: 999px; font-size: 13px; letter-spacing: 0.06em; }
+  @media (pointer: coarse) {
+    #caption { top: calc(16px + env(safe-area-inset-top)); bottom: auto; left: calc(16px + env(safe-area-inset-left)); right: 190px; }
+    #cap-name { font-size: clamp(24px, 4.5vw, 36px); }
+    #cap-sub { font-size: 13px; }
+    #hint { bottom: calc(28px + env(safe-area-inset-bottom)); left: 170px; right: 170px; text-align: center; }
+  }
+
+  #nogpu { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: #0d0c0b; text-align: center; padding: 16px; }
+  #nogpu p { color: var(--dim); max-width: 420px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="loader">
+  <div class="card">
+    <svg class="tower" viewBox="0 0 40 110" aria-hidden="true">
+      <path fill="#c9b48f" d="M20 0 l2 6 h-4z M11 34 h18 l-2 -4 h-14z M12 30 h16 l-8 -22 z M10 36 h20 l4 72 h-28z"/>
+      <rect x="17.5" y="58" width="5" height="9" fill="#16130f"/>
+      <rect x="19" y="78" width="2" height="6" fill="#16130f"/>
+    </svg>
+    <h1>ГӀалгӀайче</h1>
+    <p class="latin">Ghalghaiche — the land of towers</p>
+    <p class="lede">A flight through the gorges of Ingushetia: stone battle towers, ruined tower towns, cities of the dead and the snows of the Caucasus, all generated by code.</p>
+    <div class="track"><div id="bar"></div></div>
+    <div id="status">Starting</div>
+    <button id="enter" hidden>Enter</button>
+    <div class="keys">
+      <kbd>Mouse</kbd> look · <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> fly · <kbd>E</kbd>/<kbd>Q</kbd> up/down · <kbd>Shift</kbd> faster<br>
+      <kbd>1</kbd>–<kbd>6</kbd> viewpoints · <kbd>T</kbd> guided tour · <kbd>Esc</kbd> menu · <kbd>M</kbd> sound · <kbd>H</kbd> stats<br>
+      On a phone or tablet: left stick to fly, drag to look
+    </div>
+  </div>
+</div>
+
+<div id="menu" hidden>
+  <div class="panel">
+    <h2>ГӀалгӀайче</h2>
+    <p class="latin">Ghalghaiche — the land of towers</p>
+    <div class="label">Viewpoints</div>
+    <div id="views"></div>
+    <div class="row" style="margin-top:6px"><button id="tour">Guided tour</button></div>
+    <div class="label">Time of day</div>
+    <div class="row" id="time"></div>
+    <div class="label">Detail</div>
+    <div class="row" id="quality"></div>
+    <div class="label">Sound</div>
+    <div class="row"><button id="sound">Sound: on</button></div>
+    <div class="label">Controls</div>
+    <div class="help">
+      Mouse to look, <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to fly, <kbd>E</kbd>/<kbd>Q</kbd> up and down, hold <kbd>Shift</kbd> to go faster, <kbd>T</kbd> for the guided tour.
+      On touch screens, the left stick flies, ▲ ▼ go up and down, » goes faster, and dragging anywhere else looks around.
+    </div>
+    <button id="resume">Resume</button>
+  </div>
+</div>
+
+<div id="caption"><div id="cap-num"></div><div id="cap-name"></div><div id="cap-sub"></div></div>
+<div id="hint">Esc for menu · 1–6 for viewpoints · T for a guided tour</div>
+<div id="touch" hidden>
+  <div id="stick" aria-label="Fly"><div id="knob"></div></div>
+  <button class="tbtn" id="t-up" aria-label="Up">▲</button>
+  <button class="tbtn" id="t-down" aria-label="Down">▼</button>
+  <button class="tbtn" id="t-fast" aria-label="Faster">»</button>
+  <button class="tbtn" id="t-menu" aria-label="Menu">☰</button>
+  <button class="tbtn" id="t-tour" aria-label="Guided tour">Tour</button>
+</div>
+<pre id="stats" hidden></pre>
+
+<div id="nogpu" hidden>
+  <div>
+    <h1 style="font-size:40px">ГӀалгӀайче</h1>
+    <p id="nogpu-msg">This scene needs WebGPU. Open it in a recent version of Chrome, Edge or Safari on a desktop or a recent phone.</p>
+  </div>
+</div>
+
+<!--APP-->
+</body>
+</html>

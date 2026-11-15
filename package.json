@@ -1,0 +1,16 @@
+{
+  "name": "ghalghaiche",
+  "version": "1.0.0",
+  "description": "A procedural WebGPU flight through the mountains, gorges and stone towers of Ingushetia.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:readable": "node build.mjs --readable",
+    "dev": "node build.mjs --readable --watch"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "packageManager": "pnpm@11.12.0"
+}
