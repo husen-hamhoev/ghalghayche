@@ -7,6 +7,7 @@ import { Soundscape } from './audio.js';
 import { PRESETS, ORDER, loadSettings, saveSettings, AutoQuality } from './quality.js';
 import { TIMES, DAY_SECONDS, environment } from './env.js';
 import { perspectiveRZ, viewFromBasis, mat4mul, clamp, lerp, smoothstep, v3 } from './math.js';
+import { t, setLang, getLang, detectLang, applyDom, LANGS } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -18,13 +19,18 @@ function setProgress(p, text) {
 }
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+// Language first, so the loading screen speaks it from the start.
+const settings = loadSettings();
+setLang(detectLang(settings.lang));
+applyDom();
+
 async function main() {
   if (!navigator.gpu) return fail();
   let adapter;
   try { adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }); } catch { adapter = null; }
   if (!adapter) return fail();
   const device = await adapter.requestDevice();
-  device.lost.then((info) => { if (info.reason !== 'destroyed') fail('The graphics device was lost. Reload the page to try again.'); });
+  device.lost.then((info) => { if (info.reason !== 'destroyed') fail(t('err.lost')); });
   device.addEventListener?.('uncapturederror', (e) => console.error(e.error?.message || e));
 
   const canvas = $('c');
@@ -32,26 +38,25 @@ async function main() {
   const format = navigator.gpu.getPreferredCanvasFormat();
   context.configure({ device, format, alphaMode: 'opaque' });
 
-  const settings = loadSettings();
   if (params.get('t') && TIMES.some((t) => t.id === params.get('t'))) settings.time = params.get('t');
 
   // ---- build the world ----------------------------------------------------------
-  setProgress(0.02, 'Raising the mountains');
+  setProgress(0.02, t('status.mountains'));
   await tick();
   const terrain = new Terrain();
   await terrain.generate((p) => setProgress(0.02 + p * 0.55));
-  setProgress(0.6, 'Building the towers');
+  setProgress(0.6, t('status.towers'));
   await tick();
   const plan = planWorld(terrain);
   terrain.finalize(plan.sites, plan.paths);
-  setProgress(0.75, 'Planting forests');
+  setProgress(0.75, t('status.forests'));
   await tick();
   const surf = riverSurfaces(terrain);
   const structures = buildStructures(terrain, plan, surf);
   const viewpoints = makeViewpoints(terrain, plan);
   const sets = scatter(terrain, plan, 1);
   const water = buildWater(terrain, surf, plan.waterfall, plan.melt);
-  setProgress(0.88, 'Lighting the gorge');
+  setProgress(0.88, t('status.light'));
   await tick();
 
   let quality = PRESETS[settings.quality];
@@ -64,7 +69,7 @@ async function main() {
   let lightDir = env.sunDir;
   renderer.computeLight(env.sunDir);
   await device.queue.onSubmittedWorkDone();
-  setProgress(1, 'Ready');
+  setProgress(1, t('status.ready'));
 
   // ---- camera --------------------------------------------------------------------
   const cam = { pos: [0, 0, 0], yaw: 0, pitch: 0, vel: [0, 0, 0], fov: 62 * Math.PI / 180, proj: null, fwd: [0, 0, -1], right: [1, 0, 0], up: [0, 1, 0] };
@@ -105,13 +110,13 @@ async function main() {
     tour.i = 0;
     tour.hold = 0;
     flyTo(0, true);
-    $('tour').textContent = 'Stop tour';
+    $('tour').textContent = t('menu.stopTour');
     $('t-tour')?.classList.add('on');
   };
   const stopTour = () => {
     if (!tour.on) return;
     tour.on = false;
-    $('tour').textContent = 'Guided tour';
+    $('tour').textContent = t('menu.tour');
     $('t-tour')?.classList.remove('on');
   };
 
@@ -249,7 +254,7 @@ async function main() {
   // Detail menu: Auto (adapts both ways) or a pinned level.
   const refreshDetailMenu = () => buildChoice(
     $('quality'),
-    [{ id: 'auto', label: `Auto (${PRESETS[settings.quality].label})` }, ...ORDER.map((id) => ({ id, label: PRESETS[id].label }))],
+    [{ id: 'auto', label: t('detail.auto', { level: t('detail.' + settings.quality) }) }, ...ORDER.map((id) => ({ id, label: t('detail.' + id) }))],
     settings.auto ? 'auto' : settings.quality,
     (id) => {
       if (id === 'auto') { settings.auto = true; auto.raise = true; saveSettings(settings); refreshDetailMenu(); return; }
@@ -271,9 +276,8 @@ async function main() {
   const setSound = (on) => {
     settings.sound = on; saveSettings(settings);
     audio.setEnabled(on);
-    $('sound').textContent = on ? 'Sound: on' : 'Sound: off';
+    $('sound').textContent = t(on ? 'sound.on' : 'sound.off');
   };
-  buildChoice($('time'), TIMES, settings.time, applyTime);
 
   // ---- seasons and weather --------------------------------------------------------------
   const SEASONS = [
@@ -291,8 +295,13 @@ async function main() {
   if (!WEATHERS.some((x) => x.id === settings.weather)) settings.weather = 'clear';
   if (params.get('season')) settings.season = params.get('season');
   if (params.get('weather')) settings.weather = params.get('weather');
-  buildChoice($('season'), SEASONS, settings.season, (id) => { settings.season = id; saveSettings(settings); renderer.resetHistory = true; });
-  buildChoice($('weather'), WEATHERS, settings.weather, (id) => { settings.weather = id; saveSettings(settings); wx.phase = 'clear'; wx.t = 0; });
+  // (re)build the choice rows in the current language
+  const buildChoices = () => {
+    buildChoice($('time'), TIMES.map((x) => ({ id: x.id, label: t('time.' + x.id) })), settings.time, applyTime);
+    buildChoice($('season'), SEASONS.map((x) => ({ id: x.id, label: t('season.' + x.id) })), settings.season, (id) => { settings.season = id; saveSettings(settings); renderer.resetHistory = true; });
+    buildChoice($('weather'), WEATHERS.map((x) => ({ id: x.id, label: t('weather.' + x.id) })), settings.weather, (id) => { settings.weather = id; saveSettings(settings); wx.phase = 'clear'; wx.t = 0; });
+  };
+  buildChoices();
 
   // Weather state. "Changing" cycles: clear, clouds gather on the peaks, rain
   // (snow in winter), then clearing, with a rainbow when the sun is low behind you.
@@ -352,14 +361,21 @@ async function main() {
     };
   };
   $('sound').onclick = () => setSound(!settings.sound);
-  $('sound').textContent = settings.sound ? 'Sound: on' : 'Sound: off';
-  const vpList = $('views');
-  viewpoints.forEach((vp, i) => {
-    const b = document.createElement('button');
-    b.innerHTML = `<b>${i + 1}</b> ${vp.name}`;
-    b.onclick = () => { toggleMenu(false); stopTour(); flyTo(i); };
-    vpList.appendChild(b);
-  });
+  $('sound').textContent = t(settings.sound ? 'sound.on' : 'sound.off');
+  const placeName = (vp) => t('place.' + vp.id);
+  const buildPlaces = () => {
+    const vpList = $('views');
+    vpList.innerHTML = '';
+    viewpoints.forEach((vp, i) => {
+      const b = document.createElement('button');
+      const num = document.createElement('b');
+      num.textContent = String(i + 1);
+      b.append(num, ' ', placeName(vp));
+      b.onclick = () => { toggleMenu(false); stopTour(); flyTo(i); };
+      vpList.appendChild(b);
+    });
+  };
+  buildPlaces();
   $('resume').onclick = () => toggleMenu(false);
   $('close').onclick = () => toggleMenu(false);
   // tapping outside the panel closes the menu
@@ -372,13 +388,41 @@ async function main() {
   const marks = viewpoints.map((vp, i) => {
     const el = document.createElement('button');
     el.className = 'mark';
-    el.setAttribute('aria-label', `Fly to ${vp.name}`);
-    el.innerHTML = `<span class="ring">${i + 1}</span><span class="name">${vp.name}</span><span class="stem"></span>`;
+    el.innerHTML = `<span class="ring">${i + 1}</span><span class="name"></span><span class="stem"></span>`;
     el.addEventListener('click', (e) => { e.stopPropagation(); stopTour(); flyTo(i); });
     el.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); stopTour(); flyTo(i); });
     $('marks').appendChild(el);
     return { el, vp, w: 0, h: 0 };
   });
+  const labelMarks = () => {
+    for (const m of marks) {
+      m.el.setAttribute('aria-label', t('mark.fly', { name: placeName(m.vp) }));
+      m.el.querySelector('.name').textContent = placeName(m.vp);
+      m.el.querySelector('.name').dataset.aim = t('mark.aim');
+      m.w = 0; // remeasure
+    }
+  };
+  labelMarks();
+
+  // ---- language ----------------------------------------------------------------------
+  const setLanguage = (id) => {
+    settings.lang = id; saveSettings(settings);
+    setLang(id);
+    applyDom();
+    buildChoices();
+    refreshDetailMenu();
+    buildPlaces();
+    labelMarks();
+    buildLangs();
+    $('sound').textContent = t(settings.sound ? 'sound.on' : 'sound.off');
+    $('tour').textContent = t(tour.on ? 'menu.stopTour' : 'menu.tour');
+    if (coarse) $('hint').textContent = t('hint.touch');
+    if (lastCaption && captionTimer > 0) showCaption(...lastCaption);
+  };
+  const buildLangs = () => {
+    for (const el of [$('lang-loader'), $('lang-menu')]) buildChoice(el, LANGS, getLang(), setLanguage);
+  };
+  buildLangs();
   const updateMarks = () => {
     const vpm = mat4mul(cam.proj, viewFromBasis(cam.pos, cam.right, cam.up, cam.fwd));
     const W = innerWidth, H = innerHeight;
@@ -427,10 +471,12 @@ async function main() {
   }
 
   let captionTimer = 0;
+  let lastCaption = null;
   function showCaption(vp, i) {
     $('cap-num').textContent = String(i + 1);
-    $('cap-name').textContent = vp.name;
-    $('cap-sub').textContent = vp.sub;
+    $('cap-name').textContent = placeName(vp);
+    $('cap-sub').textContent = t('place.' + vp.id + '.sub');
+    lastCaption = [vp, i];
     $('caption').classList.add('show');
     captionTimer = 5.5;
   }
@@ -444,7 +490,7 @@ async function main() {
     started = true;
     $('loader').classList.add('gone');
     $('marks').hidden = false;
-    if (coarse) { $('touch').hidden = false; $('hint').textContent = 'Tap a checkpoint to fly there · left stick to fly · drag to look'; }
+    if (coarse) { $('touch').hidden = false; $('hint').textContent = t('hint.touch'); }
     $('hint').classList.add('show');
     setTimeout(() => $('hint').classList.remove('show'), 7000);
     if (!AUTO) {
@@ -506,7 +552,7 @@ async function main() {
       // shadows follow the key light; recompute when it has moved a little
       const moved = Math.acos(clamp(v3.dot(env.sunDir, lightDir), -1, 1));
       if (moved > (quality.detail === 0 ? 0.03 : 0.008)) { renderer.computeLight(env.sunDir); lightDir = env.sunDir; }
-      if (menuOpen) $('time').querySelector('button:last-child').textContent = `Day & night · ${fmtClock(clock)}`;
+      if (menuOpen) $('time').querySelector('button:last-child').textContent = `${t('time.cycle')} · ${fmtClock(clock)}`;
     }
     env.fade = fade;
     const flash = updateWeather(dt, env.skySun[1] > 0);
@@ -601,10 +647,10 @@ async function main() {
   requestAnimationFrame(frame);
 }
 
-function fail(msg) {
+function fail(msg = t('err.nogpu')) {
   $('loader').classList.add('gone');
   $('nogpu').hidden = false;
   if (msg) $('nogpu-msg').textContent = msg;
 }
 
-main().catch((e) => { console.error(e); fail('Something went wrong while building the world: ' + (e?.message || e)); });
+main().catch((e) => { console.error(e); fail(t('err.build', { msg: e?.message || e })); });

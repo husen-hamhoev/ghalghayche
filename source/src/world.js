@@ -755,6 +755,9 @@ export function makeViewpoints(t, plan) {
     const tz = S(900), tx = RIVER.x(tz);
     vps.push(look('Myat-Loam', 'The Table Mountain, high above the gorge', from, [tx, RIVER.bed(tz) + V(700), tz]));
   }
+  // stable ids (names and descriptions come from the translations)
+  ['erzi', 'egikal', 'vovnushki', 'targim', 'gorge', 'myatloam'].forEach((id, i) => { vps[i].id = id; });
+
   // where each checkpoint floats in the sky: above the place itself
   const anchors = [
     [erzi.x, erzi.h + 70, erzi.z],

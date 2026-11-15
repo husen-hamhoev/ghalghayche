@@ -32,6 +32,10 @@ Download `index.html` and open it in a browser with WebGPU: a recent Chrome or E
 - Evening by default: blue twilight, a warm afterglow in the west, stars, and a large moon rising over the ridges. Dawn, morning, midday and golden hour are in the menu
 - **Day & night**: an automatic cycle (16 minutes per day, slower around sunrise and sunset). The sun sets, stars and the moon come out, fires are lit, and dawn returns, with mountain shadows following the sun and moon
 
+## Languages
+
+English and Russian. A device set to Russian starts in Russian, others in English. Switch on the loading screen or under Language in the menu, or add `?lang=ru` / `?lang=en` to the link. All texts live in `source/src/i18n.js`.
+
 ## Viewpoints
 
 | Key | Place | |
@@ -104,6 +108,7 @@ pnpm dev              # rebuild on every change
 | `source/src/main.js` | Camera, controls, menu, loading |
 | `source/src/audio.js` | Soundscape |
 | `source/src/quality.js` | Detail levels and automatic fallback |
+| `source/src/i18n.js` | English and Russian texts |
 | `source/template.html` | Page layout, loading screen, menu and styles |
 
 Inspired by [Abyssal Garden](https://github.com/Noniv/abyssal-garden), a single-file WebGPU underwater world.
