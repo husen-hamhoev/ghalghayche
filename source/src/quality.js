@@ -1,19 +1,20 @@
 // Detail levels, saved settings and automatic fallback on slow devices.
 
 export const PRESETS = {
+  // Low is tuned for phones: no shadow map, no MSAA, light shaders.
   low: {
-    label: 'Low', scale: 0.65, maxDpr: 1, msaa: 1, shadow: 1024, shadowExtent: 220,
-    grassN: 150, grassSpacing: 0.8, treeDist: 1300, treeLodDist: 260, rockDist: 500,
-    lod: [380, 1000], density: 0.45,
+    label: 'Low', detail: 0, scale: 0.72, maxDpr: 1.5, msaa: 1, shadowMap: false, shadow: 1024, shadowExtent: 220,
+    grassN: 140, grassSpacing: 0.8, grassBlades: 2, treeDist: 1000, treeLodDist: 200, rockDist: 450,
+    lod: [300, 800], density: 0.4,
   },
   medium: {
-    label: 'Medium', scale: 0.85, maxDpr: 1.5, msaa: 4, shadow: 2048, shadowExtent: 300,
-    grassN: 260, grassSpacing: 0.6, treeDist: 2300, treeLodDist: 480, rockDist: 900,
-    lod: [560, 1500], density: 0.75,
+    label: 'Medium', detail: 1, scale: 0.85, maxDpr: 1.5, msaa: 4, shadowMap: true, shadow: 2048, shadowExtent: 300,
+    grassN: 240, grassSpacing: 0.6, grassBlades: 3, treeDist: 2000, treeLodDist: 420, rockDist: 900,
+    lod: [520, 1400], density: 0.75,
   },
   high: {
-    label: 'High', scale: 1.0, maxDpr: 2, msaa: 4, shadow: 4096, shadowExtent: 380,
-    grassN: 380, grassSpacing: 0.5, treeDist: 3400, treeLodDist: 750, rockDist: 1400,
+    label: 'High', detail: 2, scale: 1.0, maxDpr: 2, msaa: 4, shadowMap: true, shadow: 4096, shadowExtent: 380,
+    grassN: 380, grassSpacing: 0.5, grassBlades: 3, treeDist: 3400, treeLodDist: 750, rockDist: 1400,
     lod: [800, 2000], density: 1.0,
   },
 };
@@ -38,9 +39,8 @@ export function saveSettings(s) {
 
 function guessQuality() {
   const ua = navigator.userAgent;
-  // recent iPhones and iPads have strong GPUs; other phones start low
-  if (/iPhone|iPad/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'medium';
-  if (/Android|Mobile/i.test(ua)) return 'low';
+  // phones and tablets start low; the automatic fallback only ever steps down
+  if (/iPhone|iPad|Android|Mobile/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'low';
   return (navigator.hardwareConcurrency || 4) >= 8 ? 'high' : 'medium';
 }
 
@@ -57,15 +57,18 @@ export class AutoQuality {
   }
   update(dt) {
     if (!this.enabled || dt > 0.25) return;
-    this.avg = this.avg * 0.95 + dt * 1000 * 0.05;
-    if (this.avg > 24) { this.slow += dt; this.fast = 0; }
+    this.avg = this.avg * 0.92 + dt * 1000 * 0.08;
+    // well under 30 fps: react within a second; mildly slow: within two
+    if (this.avg > 34) { this.slow += dt * 2; this.fast = 0; }
+    else if (this.avg > 22) { this.slow += dt; this.fast = 0; }
     else if (this.avg < 13) { this.fast += dt; this.slow = 0; }
     else { this.slow = Math.max(0, this.slow - dt); this.fast = 0; }
-    if (this.slow > 2.5) {
+    if (this.slow > 2) {
       this.slow = 0;
-      if (this.scale > 0.6) this.scale = Math.max(0.55, this.scale * 0.85);
+      if (this.avg > 40 && this.scale >= 0.99) this.onDrop(); // far too slow: drop a level at once
+      else if (this.scale > 0.62) this.scale = Math.max(0.55, this.scale * 0.82);
       else this.onDrop();
-      this.avg = 16;
+      this.avg = 18;
     }
     if (this.fast > 6 && this.scale < 1) {
       this.fast = 0;

@@ -304,6 +304,7 @@ async function main() {
   $('enter').onclick = begin;
   if (AUTO) begin();
   if (params.has('stats')) $('stats').hidden = false;
+  if (params.has('noauto')) auto.enabled = false;
 
   // ---- frame loop ------------------------------------------------------------------------
   let last = performance.now();

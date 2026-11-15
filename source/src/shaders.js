@@ -16,7 +16,7 @@ struct U {
   fog: vec4f,       // density, 1/scaleHeight, base height, valley mist
   world: vec4f,     // min, cell, samples, size
   grass: vec4f,     // origin x, origin z, spacing, grid size
-  params: vec4f,    // grass radius, shadow texel, tree fade dist, grass blades on
+  params: vec4f,    // grass radius, shadow texel, tree fade dist, detail tier (0 low, 1 medium, 2 high)
   skySun: vec4f,    // the real sun (may be below the horizon), w: glow strength
   glow: vec4f,      // sun glow / afterglow colour, w: star visibility
   moon: vec4f,      // moon direction, w: moon brightness
@@ -137,18 +137,29 @@ fn applyFog(col: vec3f, wp: vec3f) -> vec3f {
 
 // ---- shadows & lighting --------------------------------------------------------
 fn shadowMapVis(wp: vec3f, n: vec3f) -> f32 {
+  if (u.params.w < 0.5) { return 1.0; }
   let sp = u.shadowMat * vec4f(wp + n * 0.18, 1.0);
   let uv = sp.xy * vec2f(0.5, -0.5) + 0.5;
   if (any(uv < vec2f(0.001)) || any(uv > vec2f(0.999)) || sp.z > 1.0 || sp.z < 0.0) { return 1.0; }
   let t = u.params.y;
   var s = 0.0;
-  for (var j = -1; j <= 1; j++) {
-    for (var i = -1; i <= 1; i++) {
-      s += textureSampleCompareLevel(shadowMap, shadowSamp, uv + vec2f(f32(i), f32(j)) * t, sp.z - 0.0004);
+  var cnt = 0.0;
+  if (u.params.w < 1.5) {
+    for (var k = 0; k < 4; k++) {
+      let o = vec2f(f32(k & 1), f32(k >> 1u)) - 0.5;
+      s += textureSampleCompareLevel(shadowMap, shadowSamp, uv + o * t * 1.5, sp.z - 0.0004);
     }
+    cnt = 4.0;
+  } else {
+    for (var j = -1; j <= 1; j++) {
+      for (var i = -1; i <= 1; i++) {
+        s += textureSampleCompareLevel(shadowMap, shadowSamp, uv + vec2f(f32(i), f32(j)) * t, sp.z - 0.0004);
+      }
+    }
+    cnt = 9.0;
   }
   let e = max(abs(uv.x - 0.5), abs(uv.y - 0.5)) * 2.0;
-  return mix(s / 9.0, 1.0, smoothstep(0.8, 1.0, e));
+  return mix(s / cnt, 1.0, smoothstep(0.8, 1.0, e));
 }
 
 fn terrainLight(p: vec2f) -> vec4f { return textureSampleLevel(lightTex, linSamp, texUV(p), 0.0); }
@@ -184,7 +195,7 @@ fn tonemapACES(x: vec3f) -> vec3f {
 // ---- terrain ---------------------------------------------------------------
 const TERRAIN_SHADE = /* wgsl */ `
 fn grassTone(p: vec2f, h: f32) -> vec3f {
-  let m = fbm(p * 0.0021, 3);
+  let m = fbm(p * 0.0021, 1 + i32(u.params.w));
   let m2 = vnoise(p * 0.017);
   let lush = vec3f(0.062, 0.098, 0.03);
   let deep = vec3f(0.045, 0.075, 0.028);
@@ -200,8 +211,10 @@ fn terrainColor(wp: vec3f, nIn: vec3f, splat: vec4f, sunVis: f32, ao: f32, dist:
   // Detail normal: two octave bands, faded with distance.
   let fade1 = 1.0 - smoothstep(600.0, 2500.0, dist);
   let fade2 = 1.0 - smoothstep(30.0, 220.0, dist);
-  let d1 = fbmD(wp.xz * 0.045, 4);
-  let d2 = fbmD(wp.xz * 0.6, 3);
+  let tier = i32(u.params.w);
+  let d1 = fbmD(wp.xz * 0.045, 2 + tier);
+  var d2 = vec3f(0.5, 0.0, 0.0);
+  if (tier > 0 && dist < 220.0) { d2 = fbmD(wp.xz * 0.6, 1 + tier); }
   let steep = 1.0 - nIn.y;
   let bump = d1.yz * 0.045 * 9.0 * fade1 * (0.4 + steep * 3.0) + d2.yz * 0.6 * 0.18 * fade2;
   let n = normalize(nIn - vec3f(bump.x, 0.0, bump.y));
@@ -221,7 +234,7 @@ fn terrainColor(wp: vec3f, nIn: vec3f, splat: vec4f, sunVis: f32, ao: f32, dist:
   col = mix(col, fieldCol, splat.g * fieldMask * 0.8 * smoothstep(0.12, 0.0, slope));
 
   // rock: banded shale and limestone cliffs
-  let strataN = fbm(wp.xz * 0.006, 3);
+  let strataN = fbm(wp.xz * 0.006, 1 + tier);
   let strataW = clamp(1.0 - dist / 1500.0, 0.0, 1.0);
   let strata = mix(0.5, sin(wp.y * 0.11 + strataN * 24.0) * 0.5 + 0.5, strataW * 0.6);
   let rockA = vec3f(0.16, 0.15, 0.14);
@@ -229,7 +242,7 @@ fn terrainColor(wp: vec3f, nIn: vec3f, splat: vec4f, sunVis: f32, ao: f32, dist:
   var rock = mix(rockA, rockB, strata * 0.7 + vnoise(wp.xz * 0.05) * 0.3);
   rock *= 0.75 + 0.5 * vnoise(wp.xz * 0.4 + wp.y * 0.1);
   rock *= 0.6 + 0.8 * clamp(d1.x, 0.0, 1.0);
-  let rn = fbm(wp.xz * 0.012, 3);
+  let rn = fbm(wp.xz * 0.012, 1 + tier);
   let rockF = smoothstep(0.30, 0.44, slope + (rn - 0.5) * 0.2);
   // scree just below cliffs
   let screeF = smoothstep(0.22, 0.3, slope) * (1.0 - rockF) * smoothstep(0.5, 0.7, rn);
@@ -243,7 +256,7 @@ fn terrainColor(wp: vec3f, nIn: vec3f, splat: vec4f, sunVis: f32, ao: f32, dist:
   col = mix(col, vec3f(0.15, 0.125, 0.09) * (0.85 + 0.3 * vnoise(wp.xz * 0.8)), splat.r * 0.85);
 
   // snow: lower on gentle north faces, never on cliffs
-  let sn = fbm(wp.xz * 0.003, 4);
+  let sn = fbm(wp.xz * 0.003, 2 + tier);
   let line = u.horizon.w + (sn - 0.5) * 350.0 + n.z * 110.0;
   let snowF = smoothstep(line - 60.0, line + 60.0, h) * smoothstep(0.42, 0.62, n.y + (sn - 0.5) * 0.3);
   col = mix(col, vec3f(0.82, 0.85, 0.9), snowF);
@@ -344,19 +357,25 @@ fn farHeight(p: vec2f) -> f32 {
 }
 @vertex fn vs(@location(0) xz: vec2f) -> FOut {
   let h = farHeight(xz);
+  let e = 90.0;
+  let hx = farHeight(xz + vec2f(e, 0.0)) - farHeight(xz - vec2f(e, 0.0));
+  let hz = farHeight(xz + vec2f(0.0, e)) - farHeight(xz - vec2f(0.0, e));
   let wp = vec3f(xz.x, h, xz.y);
   var o: FOut;
   o.pos = u.viewProj * vec4f(wp, 1.0);
   o.wp = wp;
-  o.n = vec3f(0.0, 1.0, 0.0);
+  o.n = normalize(vec3f(-hx, 2.0 * e, -hz));
   return o;
 }
 @fragment fn fs(in: FOut) -> @location(0) vec4f {
   let dist = distance(in.wp, u.camPos.xyz);
-  let e = max(25.0, dist * 0.004);
-  let hx = farHeight(in.wp.xz + vec2f(e, 0.0)) - farHeight(in.wp.xz - vec2f(e, 0.0));
-  let hz = farHeight(in.wp.xz + vec2f(0.0, e)) - farHeight(in.wp.xz - vec2f(0.0, e));
-  let n = normalize(vec3f(-hx, 2.0 * e, -hz));
+  var n = normalize(in.n);
+  if (u.params.w > 1.5) {
+    let e = max(25.0, dist * 0.004);
+    let hx = farHeight(in.wp.xz + vec2f(e, 0.0)) - farHeight(in.wp.xz - vec2f(e, 0.0));
+    let hz = farHeight(in.wp.xz + vec2f(0.0, e)) - farHeight(in.wp.xz - vec2f(0.0, e));
+    n = normalize(vec3f(-hx, 2.0 * e, -hz));
+  }
   let c = terrainColor(in.wp, n, vec4f(0.0), 1.0, 0.6 + 0.4 * n.y, dist);
   return vec4f(applyFog(c, in.wp), 1.0);
 }
@@ -397,11 +416,11 @@ fn clouds(ro: vec3f, d: vec3f) -> vec4f {
   let p = ro.xz + d.xz * t;
   let time = u.camPos.w;
   let q = p * 0.00022 + vec2f(time * 0.0018, time * 0.0006);
-  var dens = fbm(q, 6);
+  var dens = fbm(q, 4 + i32(u.params.w));
   let cover = u.camFwd.w;
   dens = smoothstep(1.0 - cover, 1.0 - cover + 0.32, dens);
   if (dens <= 0.0) { return vec4f(0.0); }
-  let ls = fbm(q + u.sunDir.xz * 0.05, 4);
+  let ls = fbm(q + u.sunDir.xz * 0.05, 2 + i32(u.params.w));
   let lit = clamp(1.0 - (smoothstep(1.0 - cover, 1.0, ls) - dens * 0.3) * 1.2, 0.2, 1.0);
   let sd = max(dot(d, u.sunDir.xyz), 0.0);
   var c = mix(u.zenith.rgb * 0.8 + u.horizon.rgb * 0.4, u.sunColor.rgb * u.sunDir.w * 0.55 + u.horizon.rgb * 0.3, lit);
@@ -727,7 +746,7 @@ struct GOut {
   let n = normalize(textureSampleLevel(normalTex, linSamp, uv, 0.0).xyz);
   let splat = textureSampleLevel(splatTex, linSamp, uv, 0.0);
   let h = heightAt(xz);
-  let rockN = fbm(xz * 0.012, 3);
+  let rockN = vnoise(xz * 0.012) * 0.75 + 0.12;
   let slope = 1.0 - n.y;
   let cover = (1.0 - smoothstep(0.27, 0.38, slope + (rockN - 0.5) * 0.2))
             * (1.0 - smoothstep(0.3, 0.7, splat.r)) * (1.0 - smoothstep(0.2, 0.6, splat.a))

@@ -326,7 +326,7 @@ export class Renderer {
     const gox = Math.floor(cam.pos[0] / gs) * gs - (gn / 2) * gs;
     const goz = Math.floor(cam.pos[2] / gs) * gs - (gn / 2) * gs;
     u.set([gox, goz, gs, gn], 72);
-    u.set([(gn / 2) * gs, 1 / this.shadowSize, q.treeDist, 1], 76);
+    u.set([(gn / 2) * gs, 1 / this.shadowSize, q.treeDist, q.detail], 76);
     u.set([...env.skySun, env.glowStrength], 80);
     u.set([...env.glow, env.stars], 84);
     u.set([...env.moonDir, env.moon], 88);
@@ -339,8 +339,8 @@ export class Renderer {
 
     const enc = d.createCommandEncoder();
 
-    // --- shadow pass
-    {
+    // --- shadow pass (skipped on the lowest detail level)
+    if (q.shadowMap) {
       const pass = enc.beginRenderPass({
         colorAttachments: [],
         depthStencilAttachment: { view: this.shadowTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
@@ -428,7 +428,7 @@ export class Renderer {
 
       // grass around the camera
       pass.setPipeline(this.pipes.grass);
-      pass.draw(27, gn * gn);
+      pass.draw(9 * q.grassBlades, gn * gn);
 
       // distant mountains, then the sky where nothing was drawn
       pass.setPipeline(this.pipes.far);
