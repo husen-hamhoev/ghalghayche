@@ -361,6 +361,11 @@ async function main() {
     vpList.appendChild(b);
   });
   $('resume').onclick = () => toggleMenu(false);
+  $('close').onclick = () => toggleMenu(false);
+  // tapping outside the panel closes the menu
+  // (ignoring the click that may follow the very tap that opened it)
+  let menuOpenedAt = 0;
+  $('menu').addEventListener('click', (e) => { if (e.target === $('menu') && performance.now() - menuOpenedAt > 450) toggleMenu(false); });
 
   // ---- checkpoints in the sky: tap or click one to fly there -----------------
   let aimed = -1;
@@ -416,6 +421,7 @@ async function main() {
   function toggleMenu(force) {
     menuOpen = force ?? !menuOpen;
     $('menu').hidden = !menuOpen;
+    if (menuOpen) menuOpenedAt = performance.now();
     if (menuOpen) { document.exitPointerLock?.(); keys.clear(); }
     else if (!coarse) canvas.requestPointerLock?.()?.catch?.(() => {});
   }
