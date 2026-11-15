@@ -43,38 +43,62 @@ export class Soundscape {
     this.gust = 0.5; this.gustTarget = 0.5; this.t = 0;
   }
 
-  // iOS suspends ("interrupts") the audio when the page goes to the
-  // background and does not bring it back by itself; it may only be resumed
-  // from a touch. So: pause while hidden, try to resume when the page shows
-  // again, and retry on every touch, click or key until it is running. If the
-  // context will not come back at all, build a fresh one.
-  wake(fromGesture = false) {
+  // Resume after the page was hidden. Desktop browsers simply resume. iOS is
+  // unreliable: after a trip to the home screen its audio context may stay
+  // "interrupted", refuse to resume, or even report "running" while playing
+  // nothing. So on iOS the first touch after returning throws the old context
+  // away and builds a new one inside that touch (iOS only lets audio start
+  // from a user gesture), and unlocks it with a silent buffer.
+  wake() {
     const ctx = this.ctx;
     if (!ctx || ctx.state === 'running' || ctx.state === 'closed' || document.hidden) return;
     ctx.resume().catch(() => {});
-    if (fromGesture) {
-      clearTimeout(this.retry);
-      this.retry = setTimeout(() => {
-        if (this.ctx === ctx && ctx.state !== 'running' && !document.hidden) {
-          ctx.close().catch(() => {});
-          this.ctx = null;
-          this.start();
-        }
-      }, 600);
+  }
+
+  get needsTap() { return !!this.ctx && this.stale; }
+
+  #gesture() {
+    if (!this.ctx || document.hidden) return;
+    if (this.stale) {
+      this.stale = false;
+      const old = this.ctx;
+      this.ctx = null;
+      old.close().catch(() => {});
+      this.start();
+      this.#unlock();
+      this.onWake?.();
+      return;
     }
+    if (this.ctx.state !== 'running') { this.ctx.resume().catch(() => {}); this.#unlock(); }
+  }
+
+  #unlock() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    ctx.resume().catch(() => {});
+    const src = ctx.createBufferSource();
+    src.buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+    src.connect(ctx.destination);
+    src.start(0);
   }
 
   #listen() {
     this.listening = true;
-    document.addEventListener('visibilitychange', () => {
+    const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+    const away = () => {
       if (!this.ctx) return;
-      if (document.hidden) this.ctx.suspend().catch(() => {});
-      else this.wake();
+      if (ios) this.stale = true;
+      this.ctx.suspend().catch(() => {});
+    };
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) away();
+      else { this.wake(); if (this.needsTap) this.onNeedTap?.(); }
     });
-    window.addEventListener('pageshow', () => this.wake());
+    window.addEventListener('pagehide', away);
+    window.addEventListener('pageshow', () => { this.wake(); if (this.needsTap) this.onNeedTap?.(); });
     window.addEventListener('focus', () => this.wake());
-    for (const ev of ['touchend', 'pointerup', 'click', 'keydown']) {
-      window.addEventListener(ev, () => this.wake(true), { capture: true, passive: true });
+    for (const ev of ['touchend', 'click', 'keydown']) {
+      window.addEventListener(ev, () => this.#gesture(), { capture: true, passive: true });
     }
   }
 

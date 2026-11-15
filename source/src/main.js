@@ -125,6 +125,16 @@ async function main() {
   let menuOpen = false;
   let started = false;
   const audio = new Soundscape();
+  // iOS: after a trip to the home screen the sound needs one tap to come back
+  audio.onNeedTap = () => {
+    if (!settings.sound) return;
+    $('hint').textContent = t('hint.sound');
+    $('hint').classList.add('show');
+  };
+  audio.onWake = () => {
+    $('hint').classList.remove('show');
+    setTimeout(() => { $('hint').textContent = t(coarse ? 'hint.touch' : 'hint.mouse'); }, 600);
+  };
   audio.enabled = settings.sound;
 
   addEventListener('keydown', (e) => {
