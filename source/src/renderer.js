@@ -520,7 +520,7 @@ export class Renderer {
     u.set(env.season ?? [0, 0, 0, 0], 92);
     u.set(env.weather ?? [0, 0, 0, 0], 96);
     u.set([0, 0, env.lightningAz ?? 0, 0], 100);
-    u.set([env.valleyFog ?? 0, this.milkyWay ? 1 : 0, 0, 0], 104);
+    u.set([0, this.milkyWay ? 1 : 0, 0, 0], 104);
     const av = this.aval;
     u.set(av ? [av.sx, av.sz, av.ex, av.ez, av.t, av.run, 1, av.seed] : [0, 0, 0, 0, 0, 0, 0, 0], 108);
 

@@ -359,16 +359,6 @@ async function main() {
     return Math.max(0, 1 - f * 6) + (f > 0.15 && f < 0.32 ? 0.6 * (1 - (f - 0.15) / 0.17) : 0);
   };
   const grey = (c, k) => { const l = (c[0] + c[1] + c[2]) / 3; return c.map((v) => lerp(v, l * 0.75, k)); };
-  // Morning valley fog: forms before dawn, fills the gorge at sunrise and
-  // burns off as the sun climbs. Thickest in autumn, thinner in summer.
-  const VALLEY_FOG = { dawn: 1, morning: 0.45 };
-  const valleyFog = () => {
-    const base = settings.time === 'cycle'
-      ? smoothstep(3, 5.5, clock) * (1 - smoothstep(7.4, 10.2, clock))
-      : VALLEY_FOG[settings.time] ?? 0;
-    const k = { spring: 1, summer: 0.85, autumn: 1, winter: 0.75 }[settings.season] ?? 1;
-    return base * k * (1 - 0.6 * wx.rain);
-  };
   const withWeather = (e, flash) => {
     const c = wx.cloud;
     const season = SEASONS.find((x) => x.id === settings.season).v;
@@ -388,7 +378,6 @@ async function main() {
       weather: [wx.rain, c, flash, wx.rainbow * (e.skySun[1] > 0.02 && e.skySun[1] < 0.66 ? 1 : 0)],
       season,
       lightningAz: wx.az,
-      valleyFog: valleyFog(),
     };
   };
   $('sound').onclick = () => setSound(!settings.sound);

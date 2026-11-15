@@ -28,7 +28,6 @@ Download `index.html` and open it in a browser with WebGPU: a recent Chrome or E
 - Animals: sheep and horses grazing with shepherd dogs, East Caucasian tur on the cliffs, a wolf pack trotting the high meadows, eagles circling over the villages and bearded vultures soaring along the ridges
 - **Animals** setting (Few, Normal, Many, Lots): Lots has about four times as many: more flocks with their dogs, horse herds, tur groups, wolf packs, eagles, vultures and bats
 - Mist that drifts through the gorge in banks, heaviest at night and dawn
-- **Morning valley fog**: at dawn a sea of fog fills the gorge, with the villages and towers rising out of it, and burns off as the sun climbs (also in the Day & night cycle)
 - **Avalanches**: now and then, on a slope that is under snow in the current season and in view, an avalanche breaks loose and runs down in a billowing cloud of powder; its deep rumble arrives late when it is far away, as sound would
 - Fireflies over the meadows on warm nights, bats around the villages after dusk, butterflies by day, alpine flowers, and patches of Caucasian rhododendron with pale yellow blossoms on the high slopes
 - **Seasons**: spring, summer, autumn (golden birches, straw-coloured meadows) and winter (snow down to the river, bare trees, a frozen lake)

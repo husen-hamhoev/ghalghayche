@@ -23,7 +23,7 @@ struct U {
   season: vec4f,    // autumn, winter, spring (0..1 each; all 0 = summer), unused
   weather: vec4f,   // rain, cloud on the peaks, lightning flash, rainbow
   extra: vec4f,     // clip height, clip on (reflection pass), lightning azimuth, lake reflection ready
-  extra2: vec4f,    // valley fog (0..1), Milky Way (preview), unused, unused
+  extra2: vec4f,    // unused, Milky Way (preview), unused, unused
   aval: vec4f,      // avalanche track: start x, z, end x, z
   aval2: vec4f,     // avalanche: seconds since release, run time, on, seed
 };
@@ -159,50 +159,13 @@ fn fogAmount(wp: vec3f) -> f32 {
   return clamp(1.0 - exp(-max(amt + mist, 0.0)), 0.0, 1.0);
 }
 
-// Morning valley fog: a dense layer with a flat, gently waving top that
-// fills the gorge. Its top follows the valley floor as it rises southward
-// (x/z are world metres), so the villages on their shelves rise out of it.
-// Along a ray the depth below the top changes linearly, so the density
-// (a soft ramp around the top) integrates in closed form.
-fn fogTop(p: vec2f) -> f32 {
-  let drift = vec2f(u.camPos.w * 1.2, u.camPos.w * 0.5);
-  return 1032.0 + 0.12 * (p.y + 2048.0) + 64.0 + 26.0 * (vnoise((p + drift) * 0.0035) - 0.5) + 12.0 * (vnoise((p - drift) * 0.012) - 0.5);
-}
-fn rampInt(x: f32) -> f32 {
-  if (x < -0.5) { return 0.0; }
-  if (x > 0.5) { return x; }
-  return (x + 0.5) * (x + 0.5) * 0.5;
-}
-fn valleyFog(wp: vec3f) -> f32 {
-  let vf = u.extra2.x;
-  if (vf <= 0.001) { return 0.0; }
-  let H = 30.0;
-  let g0 = (fogTop(u.camPos.xz) - u.camPos.y) / H;
-  let g1 = (fogTop(wp.xz) - wp.y) / H;
-  var avg: f32;
-  if (abs(g1 - g0) > 1e-3) { avg = (rampInt(g1) - rampInt(g0)) / (g1 - g0); }
-  else { avg = clamp(g0 + 0.5, 0.0, 1.0); }
-  let dist = distance(wp, u.camPos.xyz);
-  return 1.0 - exp(-0.045 * vf * max(avg, 0.0) * dist);
-}
-
 fn applyFog(col: vec3f, wp: vec3f) -> vec3f {
   let f = fogAmount(wp);
   let dir = normalize(wp - u.camPos.xyz);
   let sd = max(dot(dir, u.sunDir.xyz), 0.0);
   var fc = skyColor(vec3f(dir.x, max(dir.y, -0.05) * 0.4, dir.z), false);
   fc += u.sunColor.rgb * u.sunDir.w * pow(sd, 8.0) * 0.08;
-  var c = mix(col, fc, f);
-  if (u.extra2.x > 0.001) {
-    // the fog's top lies in sunlight; it glows toward the sun
-    let vfa = valleyFog(wp);
-    let lit = u.sunColor.rgb * u.sunDir.w * (0.18 + 0.25 * smoothstep(0.0, 0.3, u.sunDir.y)) * (1.0 + 0.8 * pow(sd, 6.0));
-    // billows: brighter tops, bluer hollows between them
-    let bil = vnoise(wp.xz * 0.02 + vec2f(u.camPos.w * 0.05, 0.0));
-    let vc = lit * (0.75 + 0.5 * bil) + u.zenith.rgb * (0.32 + 0.1 * bil) + u.horizon.rgb * 0.25;
-    c = mix(c, vc, vfa);
-  }
-  return c;
+  return mix(col, fc, f);
 }
 
 // ---- shadows & lighting --------------------------------------------------------
