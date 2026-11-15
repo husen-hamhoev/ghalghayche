@@ -20,8 +20,14 @@ struct U {
   skySun: vec4f,    // the real sun (may be below the horizon), w: glow strength
   glow: vec4f,      // sun glow / afterglow colour, w: star visibility
   moon: vec4f,      // moon direction, w: moon brightness
+  season: vec4f,    // autumn, winter, spring (0..1 each; all 0 = summer), unused
+  weather: vec4f,   // rain, cloud on the peaks, lightning flash, rainbow
+  extra: vec4f,     // clip height, clip on (reflection pass), lightning azimuth, lake reflection ready
 };
 @group(0) @binding(0) var<uniform> u: U;
+// Set only for the lake's reflection pass: drop what lies below the water.
+// A pipeline constant, so the normal pipelines carry no discard at all.
+override CLIP: bool = false;
 @group(0) @binding(1) var heightTex: texture_2d<f32>;
 @group(0) @binding(2) var normalTex: texture_2d<f32>;
 @group(0) @binding(3) var splatTex: texture_2d<f32>;
@@ -129,12 +135,23 @@ fn fogAmount(wp: vec3f) -> f32 {
   if (abs(km) > 1e-5) { mist = u.fog.w * exp(-bm * ym) * (1.0 - exp(-km * dist)) / km; }
   else { mist = u.fog.w * exp(-bm * ym) * dist; }
   // the mist lies in drifting banks along the gorge, not as an even layer
-  if (u.fog.w > 1e-5) {
+  if (mist > 0.004) {
+    // two cheap noise lookups (at the point and halfway to it) are enough
     let drift = vec2f(u.camPos.w * 1.6, u.camPos.w * 0.7);
     let mid = (u.camPos.xz + wp.xz) * 0.5;
-    let oct = 2 + i32(u.params.w > 0.5);
-    let banks = fbm((wp.xz + drift) * 0.0035, oct) * 0.6 + fbm((mid + drift) * 0.0035, oct) * 0.4;
+    let banks = vnoise((wp.xz + drift) * 0.0035) * 0.6 + vnoise((mid + drift) * 0.006) * 0.4;
     mist *= 0.3 + 1.6 * smoothstep(0.32, 0.7, banks);
+  }
+  // low cloud wrapping the peaks in bad weather
+  if (u.weather.y > 0.01) {
+    let drift = vec2f(u.camPos.w * 3.0, u.camPos.w * 1.0);
+    var band = 0.0;
+    for (var i = 0; i < 4; i++) {
+      let p = u.camPos.xyz + dir * dist * (f32(i) + 0.5) / 4.0;
+      let dy = (p.y - 2250.0) / 260.0;
+      band += exp(-dy * dy) * (0.35 + 0.65 * vnoise(p.xz * 0.0025 + drift * 0.002));
+    }
+    amt += u.weather.y * 0.012 * band * dist / 4.0;
   }
   return clamp(1.0 - exp(-max(amt + mist, 0.0)), 0.0, 1.0);
 }
@@ -189,7 +206,7 @@ fn objectSunVis(wp: vec3f, n: vec3f) -> f32 {
 fn ambient(n: vec3f) -> vec3f {
   let sky = mix(u.horizon.rgb * 0.9, mix(u.horizon.rgb, u.zenith.rgb * 1.3, 0.55), n.y * 0.5 + 0.5);
   let ground = vec3f(0.30, 0.27, 0.20) * (u.sunColor.rgb * 0.3 + 0.1);
-  return mix(ground, sky, smoothstep(-0.6, 0.6, n.y)) * u.sunColor.w;
+  return mix(ground, sky, smoothstep(-0.6, 0.6, n.y)) * u.sunColor.w + vec3f(0.5, 0.55, 0.75) * u.weather.z * 1.2;
 }
 
 fn shade(albedo: vec3f, n: vec3f, vis: f32, ao: f32, wrap: f32) -> vec3f {
@@ -217,6 +234,9 @@ fn grassTone(p: vec2f, h: f32) -> vec3f {
   var c = mix(deep, lush, smoothstep(0.3, 0.6, m2));
   c = mix(c, dry, smoothstep(0.5, 0.85, m + m2 * 0.25) * 0.8);
   c = mix(c, alpine, smoothstep(1770.0, 2190.0, h + m * 210.0));
+  // autumn: rust and straw; spring: fresh green
+  c = mix(c, mix(vec3f(0.16, 0.1, 0.04), vec3f(0.24, 0.17, 0.06), m2), u.season.x * 0.85);
+  c = mix(c, c * vec3f(0.92, 1.14, 0.85) + vec3f(0.0, 0.006, 0.0), u.season.z);
   return c * (0.85 + 0.3 * vnoise(p * 0.11));
 }
 
@@ -238,8 +258,7 @@ fn terrainColor(wp: vec3f, nIn: vec3f, splat: vec4f, sunVis: f32, ao: f32, dist:
   var col = grassTone(wp.xz, h);
   // forest floor: darker, browner
   col = mix(col, vec3f(0.04, 0.06, 0.025), splat.b * 0.6);
-  // fields and hay terraces around villages
-  // fields and hay terraces around villages: a patchwork, not a disc
+  // fields and terraces around villages: a patchwork, not a disc
   let fld = vnoise(wp.xz * vec2f(0.025, 0.04) + vec2f(floor(h / 5.5) * 3.7, 0.0));
   let fieldMask = smoothstep(0.35, 0.6, vnoise(wp.xz * 0.012 + 4.0));
   let gt = grassTone(wp.xz, h);
@@ -270,10 +289,11 @@ fn terrainColor(wp: vec3f, nIn: vec3f, splat: vec4f, sunVis: f32, ao: f32, dist:
 
   // snow: lower on gentle north faces, never on cliffs
   let sn = fbm(wp.xz * 0.003, 2 + tier);
-  let line = u.horizon.w + (sn - 0.5) * 350.0 + n.z * 110.0;
+  let line = u.horizon.w - 1500.0 * u.season.y - 250.0 * u.season.z + (sn - 0.5) * 350.0 + n.z * 110.0;
   let snowF = smoothstep(line - 60.0, line + 60.0, h) * smoothstep(0.42, 0.62, n.y + (sn - 0.5) * 0.3);
   col = mix(col, vec3f(0.82, 0.85, 0.9), snowF);
 
+  col *= 1.0 - 0.25 * u.weather.x * (1.0 - snowF);
   var c = shade(col, n, sunVis, ao, 0.0);
   // a touch of specular on snow
   let v = normalize(u.camPos.xyz - wp);
@@ -326,6 +346,7 @@ struct TOut {
 }
 
 @fragment fn fs(in: TOut) -> @location(0) vec4f {
+  if (CLIP && in.wp.y < u.extra.x) { discard; }
   let uv = texUV(in.wp.xz);
   let n = normalize(textureSampleLevel(normalTex, linSamp, uv, 0.0).xyz);
   let splat = textureSampleLevel(splatTex, linSamp, uv, 0.0);
@@ -381,6 +402,7 @@ fn farHeight(p: vec2f) -> f32 {
   return o;
 }
 @fragment fn fs(in: FOut) -> @location(0) vec4f {
+  if (CLIP && in.wp.y < u.extra.x) { discard; }
   let dist = distance(in.wp, u.camPos.xyz);
   var n = normalize(in.n);
   if (u.params.w > 1.5) {
@@ -487,6 +509,22 @@ fn moonDisk(d: vec3f) -> vec4f {
   c = mix(c, mo.rgb, mo.a);
   let cl = clouds(u.camPos.xyz, d);
   c = mix(c, cl.rgb, cl.a);
+  // lightning lights up the clouds in one direction
+  if (u.weather.z > 0.0) {
+    let la = u.extra.z;
+    let ld = normalize(vec3f(sin(la), 0.25, -cos(la)));
+    c += vec3f(0.7, 0.76, 1.0) * u.weather.z * (0.25 + 2.5 * pow(max(dot(d, ld), 0.0), 6.0));
+  }
+  // rainbow: a 42-degree circle around the point opposite the sun
+  if (u.weather.w > 0.0 && d.y > 0.0) {
+    let ang = degrees(acos(clamp(dot(d, -u.skySun.xyz), -1.0, 1.0)));
+    let t = (ang - 40.4) / 2.2;
+    if (t > 0.0 && t < 1.0) {
+      let hue = vec3f(smoothstep(0.45, 1.0, t), 1.0 - abs(t - 0.5) * 2.2, smoothstep(0.55, 0.0, t) + 0.25 * smoothstep(0.2, 0.0, t));
+      let edge = smoothstep(0.0, 0.15, t) * smoothstep(1.0, 0.85, t);
+      c += max(hue, vec3f(0.0)) * edge * u.weather.w * 0.22 * smoothstep(0.0, 0.08, d.y) * (u.zenith.rgb * 2.0 + 0.4);
+    }
+  }
   let m = distantRange(d);
   if (m.a > 0.0) {
     let hz = skyColor(vec3f(d.x, 0.02, d.z), false);
@@ -519,7 +557,10 @@ fn objWorld(v: OIn) -> array<vec3f, 2> {
   var p = v.pos * vec3f(v.i1.x, v.i1.y, v.i1.x);
   let camD = distance(v.i0.xz, u.camPos.xz);
   let shrink = 1.0 - smoothstep(u.params.z * 0.8, u.params.z, camD);
-  if (mat == 1u) {
+  // bare in winter: the crown shrinks to a small twiggy core (no discard, which
+  // would slow every object drawn with this shader on tile-based GPUs)
+  if (mat == 14u) { let core = vec3f(0.0, 6.0, 0.0); p = mix(p, core + (p - core) * 0.32, u.season.y); }
+  if (mat == 1u || mat == 14u) {
     let t = u.camPos.w;
     let ph = v.i0.x * 0.13 + v.i0.z * 0.07;
     let sw = (sin(t * 1.1 + ph) + 0.5 * sin(t * 2.7 + ph * 1.7)) * 0.012 * max(p.y, 0.0);
@@ -679,6 +720,7 @@ fn masonry(wp: vec3f, n: vec3f, dist: f32) -> vec2f {
 }
 
 @fragment fn fs(in: OOut) -> @location(0) vec4f {
+  if (CLIP && in.wp.y < u.extra.x) { discard; }
   var n = normalize(in.n);
   let mat = u32(round(in.col.a * 255.0));
   var albedo = in.col.rgb;
@@ -703,11 +745,18 @@ fn masonry(wp: vec3f, n: vec3f, dist: f32) -> vec2f {
     let lichen = smoothstep(0.62, 0.8, vnoise(in.wp.xz * 1.7 + in.wp.y * 1.3)) * 0.4;
     albedo = mix(albedo, vec3f(0.42, 0.40, 0.22), lichen * 0.5);
     ao = groundAO * (0.7 + 0.3 * smoothstep(0.0, 2.5, above));
-  } else if (mat == 1u) {
-    // foliage
+  } else if (mat == 1u || mat == 14u) {
+    // foliage (14: broadleaf crowns, which turn in autumn and are bare in winter)
     let s = in.seed;
     albedo *= 0.8 + 0.4 * vnoise(in.wp.xz * 0.9 + in.wp.y * 1.3);
     albedo = mix(albedo, albedo * vec3f(1.25, 1.05, 0.7), fract(s * 7.3) * 0.5);
+    if (mat == 14u) {
+      let k = fract(s * 11.3);
+      let fall = select(select(vec3f(0.42, 0.3, 0.05), vec3f(0.45, 0.17, 0.03), k > 0.5), vec3f(0.33, 0.07, 0.03), k > 0.85);
+      albedo = mix(albedo, fall, u.season.x * 0.9);
+      albedo = mix(albedo, albedo * vec3f(0.95, 1.35, 0.8), u.season.z);
+      albedo = mix(albedo, vec3f(0.11, 0.085, 0.065) * (0.7 + 0.6 * vnoise(in.wp.xz * 6.0 + in.wp.y * 6.0)), step(0.5, u.season.y)); // bare twigs
+    }
     wrap = 0.5;
     ao = groundAO * (0.45 + 0.55 * clamp(in.lp.y / 9.0, 0.0, 1.0)) * (0.75 + 0.25 * dot(normalize(in.lp - vec3f(0.0, in.lp.y, 0.0) + vec3f(0.0001)), in.n));
     ao = clamp(ao, 0.25, 1.0);
@@ -742,17 +791,34 @@ fn masonry(wp: vec3f, n: vec3f, dist: f32) -> vec2f {
     wrap = 0.3;
   } else if (mat == 11u) {
     albedo = vec3f(0.018, 0.015, 0.012);
-  } else if (mat == 12u) {
-    // hay: streaky straw
-    albedo *= 0.75 + 0.45 * vnoise(vec2f(atan2(in.lp.x, in.lp.z) * 6.0, in.lp.y * 14.0));
-    wrap = 0.3;
-    ao = groundAO;
+  } else if (mat == 16u) {
+    // glacier: blue-white ice, dark crevasses across the flow, snow on top
+    let cr = vnoise(in.wp.xz * vec2f(0.09, 0.03) + vec2f(vnoise(in.wp.xz * 0.02) * 4.0, 0.0));
+    let crevasse = smoothstep(0.78, 0.86, cr) * (1.0 - smoothstep(0.86, 0.95, cr));
+    albedo *= 0.85 + 0.25 * vnoise(in.wp.xz * 0.3);
+    albedo = mix(albedo, vec3f(0.05, 0.1, 0.16), crevasse * 0.8);
+    let snowy = max(smoothstep(u.horizon.w + 250.0, u.horizon.w + 450.0, in.wp.y) * 0.6, u.season.y * 0.8);
+    albedo = mix(albedo, vec3f(0.84, 0.87, 0.92), snowy * smoothstep(0.5, 0.85, n.y));
+    spec = 0.5;
+  } else if (mat == 15u) {
+    // rhododendron blossom: pale yellow in spring and summer, gone otherwise
+    let bloom = (1.0 - u.season.x) * (1.0 - u.season.y);
+    albedo = mix(vec3f(0.05, 0.085, 0.04), albedo * (0.85 + 0.3 * fract(in.seed * 5.3)), bloom);
+    wrap = 0.4;
   } else if (mat == 13u) {
     albedo *= 0.8 + 0.3 * vnoise(vec2f(in.wp.y * 20.0, dot(in.wp.xz, vec2f(0.7)) * 2.0));
   }
 
+  if (u.season.y > 0.0 && ((mat < 6u && mat != 3u) || mat == 13u || mat == 14u)) {
+    albedo = mix(albedo, vec3f(0.84, 0.86, 0.9), u.season.y * smoothstep(0.35, 0.8, n.y) * 0.9);
+  }
   let vis = objectSunVis(in.wp, n);
   var c = shade(albedo, n, vis, ao, wrap);
+  if (mat == 16u) {
+    let v = normalize(u.camPos.xyz - in.wp);
+    let hv = normalize(v + u.sunDir.xyz);
+    c += u.sunColor.rgb * u.sunDir.w * pow(max(dot(n, hv), 0.0), 60.0) * spec * vis;
+  }
   if (mat == 11u) {
     // warm firelight in about half the windows, after dark
     let cell = floor(in.wp * 0.8);
@@ -802,7 +868,27 @@ export const BIRDS = COMMON + OBJ_COMMON + /* wgsl */ `
   o.wp = wp; o.n = n; o.col = v.col; o.lp = v.pos; o.seed = v.i1.w;
   return o;
 }
+// Bats: a jerky, looping flight around a home point, out only after dusk.
+@vertex fn vs_bat(v: OIn) -> OOut {
+  let t = u.camPos.w;
+  let ph = v.i0.w;
+  let out = u.glow.w * (1.0 - u.season.y) * (1.0 - u.weather.x);
+  let home = v.i0.xyz;
+  let q = vec3f(sin(t * 1.7 + ph) * 14.0 + sin(t * 4.3 + ph * 2.0) * 3.0, sin(t * 2.3 + ph) * 5.0 + sin(t * 6.1 + ph) * 1.0, cos(t * 1.3 + ph) * 14.0 + cos(t * 3.7 + ph * 3.0) * 3.0);
+  let dq = vec3f(cos(t * 1.7 + ph) * 1.7 * 14.0 + cos(t * 4.3 + ph * 2.0) * 12.9, 0.0, -sin(t * 1.3 + ph) * 1.3 * 14.0 - sin(t * 3.7 + ph * 3.0) * 11.1);
+  let fwd = normalize(dq + vec3f(1e-4, 0.0, 0.0));
+  let right = normalize(cross(fwd, vec3f(0.0, 1.0, 0.0)));
+  var p = v.pos;
+  if (abs(p.x) > 0.15) { p.y += abs(p.x) * sin(t * 22.0 + ph * 5.0) * 0.7; }
+  let wp = home + q + (right * p.x + vec3f(0.0, p.y, 0.0) + fwd * p.z) * 0.2 * out;
+  var o: OOut;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.wp = wp; o.n = vec3f(0.0, 1.0, 0.0); o.col = v.col; o.lp = v.pos; o.seed = -1.0;
+  return o;
+}
+
 @fragment fn fs(in: OOut) -> @location(0) vec4f {
+  if (in.seed < -0.5) { return vec4f(applyFog(vec3f(0.006, 0.005, 0.005), in.wp), 1.0); }
   let n = normalize(in.n);
   // bearded vultures (larger) are paler, with rusty bellies
   let col = select(in.col.rgb, in.col.rgb * vec3f(2.6, 2.1, 1.6), in.seed > 2.2);
@@ -844,7 +930,8 @@ struct GOut {
   let cover = (1.0 - smoothstep(0.27, 0.38, slope + (rockN - 0.5) * 0.2))
             * (1.0 - smoothstep(0.3, 0.7, splat.r)) * (1.0 - smoothstep(0.2, 0.6, splat.a))
             * (1.0 - smoothstep(u.horizon.w - 600.0, u.horizon.w - 250.0, h))
-            * (1.0 - splat.b * 0.6);
+            * (1.0 - splat.b * 0.6)
+            * (1.0 - u.season.y); // buried under snow in winter
   if (r3 > cover) { return o; }
   let lenScale = (1.0 - smoothstep(R * 0.55, R, dist)) * (0.55 + 0.6 * vnoise(xz * 0.15)) * (1.0 - 0.5 * splat.g);
   if (lenScale < 0.02) { return o; }
@@ -872,12 +959,19 @@ struct GOut {
   o.n = normalize(n + vec3f(bdir.x, 0.0, bdir.y) * 0.25);
   var gc = grassTone(xz, h);
   gc = mix(gc, vec3f(0.2, 0.16, 0.07), splat.g * 0.6);
-  // a few alpine flowers
+  // autumn straw
+  gc = mix(gc, vec3f(0.3, 0.23, 0.1), u.season.x * 0.6 * bh);
+  // alpine flowers: many in spring and summer, few in autumn
   let fl = hashI(cellId + vec2i(5, 211));
-  if (fl < 0.06 && blade == 0u && lvl > 0.9) {
+  let flowers = 0.07 * (1.0 + 1.2 * u.season.z) * (1.0 - 0.85 * u.season.x);
+  if (fl < flowers && blade == 0u && lvl > 0.9) {
     let pick = fract(fl * 53.0);
-    gc = select(select(select(vec3f(0.9, 0.75, 0.1), vec3f(0.5, 0.25, 0.75), pick > 0.35),
-               vec3f(0.92, 0.92, 0.88), pick > 0.6), vec3f(0.8, 0.15, 0.12), pick > 0.85);
+    var fc = vec3f(0.9, 0.75, 0.1);                       // buttercup
+    if (pick > 0.25) { fc = vec3f(0.5, 0.25, 0.75); }     // bellflower
+    if (pick > 0.45) { fc = vec3f(0.92, 0.92, 0.88); }    // daisy
+    if (pick > 0.65) { fc = vec3f(0.15, 0.3, 0.85); }     // gentian
+    if (pick > 0.82) { fc = vec3f(0.8, 0.15, 0.12); }     // poppy
+    gc = fc;
   }
   o.col = gc;
   o.tip = lvl;
@@ -1245,5 +1339,200 @@ struct FOut {
     c = light * a;
   }
   return vec4f(c * fogKeep, 0.0);
+}
+`;
+
+// ---- weather: rain streaks or snowflakes around the camera ------------------------------
+// No buffers: each instance is one drop in a box that follows the camera but
+// is anchored to the world, so the rain does not slide when you turn.
+export const PRECIP = COMMON + /* wgsl */ `
+struct POut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) fade: f32 };
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> POut {
+  var o: POut;
+  o.pos = vec4f(0.0, 0.0, -2.0, 1.0);
+  var corners = array<vec2f, 6>(vec2f(-1.0, 0.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0), vec2f(-1.0, 0.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
+  let c = corners[vi];
+  let snow = u.season.y > 0.5;
+  let h = vec3f(hash11(f32(ii) * 1.37 + 0.11), hash11(f32(ii) * 2.71 + 0.53), hash11(f32(ii) * 3.97 + 0.29));
+  let box = vec3f(70.0, 40.0, 70.0);
+  let t = u.camPos.w;
+  let speed = select(9.0, 1.3, snow);
+  var p: vec3f;
+  p.x = u.camPos.x + (fract((h.x * box.x - u.camPos.x) / box.x + 0.5) - 0.5) * box.x;
+  p.z = u.camPos.z + (fract((h.z * box.z - u.camPos.z) / box.z + 0.5) - 0.5) * box.z;
+  p.y = u.camPos.y - 18.0 + fract(h.y - t * speed / box.y) * box.y;
+  if (snow) {
+    p.x += sin(t * 0.9 + h.x * 30.0) * 0.6;
+    p.z += cos(t * 0.7 + h.z * 30.0) * 0.6;
+  }
+  // wind slants the rain a little
+  let slant = vec3f(0.18, 0.0, 0.06) * select(1.0, 0.0, snow);
+  if (p.y < heightAt(p.xz)) { return o; }
+  let right = normalize(vec3f(u.camRight.x, 0.0, u.camRight.z));
+  var wp: vec3f;
+  if (snow) {
+    let up = u.camUp.xyz;
+    wp = p + (right * c.x + up * (c.y * 2.0 - 1.0)) * 0.045;
+  } else {
+    wp = p + right * c.x * 0.012 + (vec3f(0.0, 1.0, 0.0) + slant) * c.y * 0.7;
+  }
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.uv = c;
+  o.fade = 1.0 - smoothstep(20.0, 35.0, distance(p, u.camPos.xyz));
+  return o;
+}
+@fragment fn fs(in: POut) -> @location(0) vec4f {
+  let snow = u.season.y > 0.5;
+  let light = ambient(vec3f(0.0, 1.0, 0.0)) * 0.9 + u.sunColor.rgb * u.sunDir.w * 0.25 + vec3f(0.6) * u.weather.z;
+  var a: f32;
+  var col: vec3f;
+  if (snow) {
+    let r = length(vec2f(in.uv.x, in.uv.y * 2.0 - 1.0));
+    a = smoothstep(1.0, 0.3, r) * 0.9;
+    col = vec3f(0.92, 0.94, 1.0) * light;
+  } else {
+    a = (1.0 - abs(in.uv.x)) * smoothstep(0.0, 0.3, in.uv.y) * 0.22;
+    col = vec3f(0.75, 0.8, 0.85) * light;
+  }
+  a *= in.fade * u.weather.x;
+  return vec4f(col * a, a);
+}
+`;
+
+// ---- small life around the camera: fireflies at night, butterflies by day -----------------
+// Like the grass, these need no buffers: each instance is placed in a box
+// that follows the camera but is anchored to the world.
+export const BUGS = COMMON + /* wgsl */ `
+fn boxPos(ii: u32, size: f32, salt: f32) -> vec3f {
+  let h = vec3f(hash11(f32(ii) * 1.73 + salt), hash11(f32(ii) * 3.11 + salt * 2.0), hash11(f32(ii) * 5.37 + salt * 3.0));
+  var p: vec3f;
+  p.x = u.camPos.x + (fract((h.x * size - u.camPos.x) / size + 0.5) - 0.5) * size;
+  p.z = u.camPos.z + (fract((h.z * size - u.camPos.z) / size + 0.5) - 0.5) * size;
+  p.y = h.y;
+  return p;
+}
+fn warmSeason() -> f32 { return (1.0 - u.season.y) * (1.0 - 0.75 * u.season.x); }
+fn meadow(p: vec2f) -> f32 {
+  let n = textureSampleLevel(normalTex, linSamp, texUV(p), 0.0).xyz;
+  return smoothstep(0.8, 0.92, normalize(n).y) * (1.0 - smoothstep(1500.0, 1700.0, heightAt(p)));
+}
+
+struct FOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) glow: f32, @location(2) wp: vec3f };
+@vertex fn vs_firefly(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> FOut {
+  var o: FOut;
+  o.pos = vec4f(0.0, 0.0, -2.0, 1.0);
+  let on = u.glow.w * warmSeason() * (1.0 - u.weather.x);
+  if (on < 0.05) { return o; }
+  var p = boxPos(ii, 80.0, 0.37);
+  let t = u.camPos.w;
+  let ph = f32(ii) * 0.618;
+  p.x += sin(t * 0.4 + ph * 7.0) * 1.5;
+  p.z += cos(t * 0.33 + ph * 5.0) * 1.5;
+  if (meadow(p.xz) < 0.5) { return o; }
+  p.y = heightAt(p.xz) + 0.4 + p.y * 2.0 + sin(t * 0.7 + ph * 3.0) * 0.3;
+  var corners = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
+  let c = corners[vi];
+  let blink = pow(max(sin(t * (0.9 + fract(ph) * 0.8) + ph * 40.0), 0.0), 6.0);
+  let wp = p + (u.camRight.xyz * c.x + u.camUp.xyz * c.y) * 0.25;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.uv = c;
+  o.glow = blink * on;
+  o.wp = p;
+  return o;
+}
+@fragment fn fs_firefly(in: FOut) -> @location(0) vec4f {
+  let r = length(in.uv);
+  let c = vec3f(0.75, 1.0, 0.3) * pow(max(1.0 - r, 0.0), 3.0) * 9.0 * in.glow;
+  return vec4f(c * (1.0 - fogAmount(in.wp)), 0.0);
+}
+
+struct BOut { @builtin(position) pos: vec4f, @location(0) n: vec3f, @location(1) col: vec3f, @location(2) wp: vec3f };
+@vertex fn vs_butterfly(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> BOut {
+  var o: BOut;
+  o.pos = vec4f(0.0, 0.0, -2.0, 1.0);
+  let on = (1.0 - u.glow.w) * (1.0 - u.season.y) * (1.0 - 0.7 * u.season.x) * (1.0 - u.weather.x) * step(0.1, u.sunDir.y);
+  if (on < 0.5) { return o; }
+  var p = boxPos(ii, 50.0, 0.71);
+  let t = u.camPos.w;
+  let ph = f32(ii) * 0.618;
+  let wander = vec2f(sin(t * 0.5 + ph * 9.0) + 0.5 * sin(t * 1.3 + ph * 4.0), cos(t * 0.45 + ph * 7.0) + 0.5 * cos(t * 1.1 + ph * 3.0)) * 2.5;
+  p.x += wander.x; p.z += wander.y;
+  if (meadow(p.xz) < 0.5) { return o; }
+  p.y = heightAt(p.xz) + 0.35 + p.y * 1.2 + sin(t * 3.0 + ph * 11.0) * 0.15;
+  let dir = normalize(vec2f(cos(t * 0.5 + ph * 9.0) + 0.65 * cos(t * 1.3 + ph * 4.0), -sin(t * 0.45 + ph * 7.0) - 0.55 * sin(t * 1.1 + ph * 3.0)) + vec2f(1e-4));
+  // two wings, each a quad hinged on the body, beating fast
+  let wing = vi / 6u;
+  var corners = array<vec2f, 6>(vec2f(0.0, -0.4), vec2f(1.0, -0.6), vec2f(1.0, 0.6), vec2f(0.0, -0.4), vec2f(1.0, 0.6), vec2f(0.0, 0.5));
+  let c = corners[vi % 6u];
+  let side = select(-1.0, 1.0, wing == 1u);
+  let flap = sin(t * 16.0 + ph * 30.0) * 1.1;
+  let size = 0.09;
+  let local = vec3f(side * c.x * cos(flap), c.x * abs(sin(flap)), c.y) * size;
+  let fwd = vec3f(dir.x, 0.0, dir.y);
+  let right = vec3f(fwd.z, 0.0, -fwd.x);
+  let wp = p + right * local.x + vec3f(0.0, local.y, 0.0) + fwd * local.z;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.n = normalize(vec3f(-side * sin(flap), cos(flap), 0.0));
+  let k = fract(ph * 13.7);
+  var col = vec3f(0.95, 0.85, 0.2);                    // brimstone yellow
+  if (k > 0.3) { col = vec3f(0.92, 0.92, 0.88); }      // white
+  if (k > 0.55) { col = vec3f(0.9, 0.42, 0.08); }      // orange
+  if (k > 0.75) { col = vec3f(0.25, 0.4, 0.85); }      // blue
+  if (k > 0.9) { col = vec3f(0.45, 0.12, 0.06); }      // red-brown
+  o.col = col;
+  o.wp = wp;
+  return o;
+}
+@fragment fn fs_butterfly(in: BOut) -> @location(0) vec4f {
+  let c = shade(in.col, normalize(in.n), 1.0, 1.0, 0.6);
+  return vec4f(applyFog(c, in.wp), 1.0);
+}
+`;
+
+// ---- the mountain lake: calm water that mirrors the scene ------------------------------------
+// On Medium and High the scene is drawn a second time, mirrored in the lake's
+// surface, into reflTex; the lake shows it, rippled, blended by the viewing
+// angle. Otherwise it reflects the sky. In winter it freezes.
+export const LAKE = COMMON + /* wgsl */ `
+@group(1) @binding(0) var reflTex: texture_2d<f32>;
+struct LOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f };
+@vertex fn vs(@location(0) p: vec3f) -> LOut {
+  var o: LOut;
+  o.pos = u.viewProj * vec4f(p, 1.0);
+  o.wp = p;
+  return o;
+}
+@fragment fn fs(in: LOut) -> @location(0) vec4f {
+  let t = u.camPos.w;
+  let up = vec3f(0.0, 1.0, 0.0);
+  let v = normalize(u.camPos.xyz - in.wp);
+  if (u.season.y > 0.5) {
+    // frozen: pale ice with a dusting of snow
+    let ice = mix(vec3f(0.62, 0.72, 0.8), vec3f(0.85, 0.87, 0.9), smoothstep(0.4, 0.7, vnoise(in.wp.xz * 0.08)));
+    let lt = terrainLight(in.wp.xz);
+    var c = shade(ice, up, lt.r, 1.0, 0.0);
+    let hv = normalize(v + u.sunDir.xyz);
+    c += u.sunColor.rgb * u.sunDir.w * pow(max(dot(up, hv), 0.0), 80.0) * 0.4 * lt.r;
+    return vec4f(applyFog(c, in.wp), 1.0);
+  }
+  let d = fbmD(in.wp.xz * 0.18 + vec2f(t * 0.06, t * 0.04), 3) + fbmD(in.wp.xz * 0.05 - vec2f(t * 0.02, 0.0), 2) * 0.5;
+  let calm = 0.06 + 0.25 * u.weather.x;
+  let n = normalize(vec3f(d.y * calm, 1.0, d.z * calm));
+  let fres = 0.04 + 0.96 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
+  var refl: vec3f;
+  if (u.extra.w > 0.5) {
+    let dims = vec2f(textureDimensions(reflTex));
+    let uv = in.pos.xy / (dims * 2.0) + n.xz * 0.03;
+    refl = textureSampleLevel(reflTex, linSamp, uv, 0.0).rgb;
+  } else {
+    let r = reflect(-v, n);
+    refl = skyColor(normalize(vec3f(r.x, abs(r.y), r.z)), false);
+  }
+  let lt = terrainLight(in.wp.xz);
+  let deep = vec3f(0.015, 0.04, 0.05) * (ambient(up) + u.sunColor.rgb * u.sunDir.w * 0.3 * lt.r);
+  var c = mix(deep, refl, clamp(fres + 0.35, 0.0, 1.0));
+  let hv = normalize(v + u.sunDir.xyz);
+  c += u.sunColor.rgb * u.sunDir.w * pow(max(dot(n, hv), 0.0), 200.0) * 2.5 * lt.r;
+  return vec4f(applyFog(c, in.wp), 1.0);
 }
 `;

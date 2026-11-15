@@ -3,14 +3,17 @@
 import * as S from './shaders.js';
 import { N, CELL, MIN, SIZE, TILES, TILE_Q } from './terrain.js';
 import { mat4mul, mat4invert, ortho, viewFromBasis, frustumPlanes, boxVisible, v3 } from './math.js';
-import { pineMesh, broadleafMesh, rockMesh, cragMesh, sheepMesh, eagleMesh, horseMesh, dogMesh, wolfMesh, turMesh, hayMesh } from './meshes.js';
+import { pineMesh, broadleafMesh, rockMesh, cragMesh, sheepMesh, eagleMesh, horseMesh, dogMesh, wolfMesh, turMesh, rhodoMesh } from './meshes.js';
 
 const HDR = 'rgba16float';
 const DEPTH = 'depth32float';
-const UBO_SIZE = 368;
+const UBO_SIZE = 416;
 
 // WGSL template literals carry lots of indentation; trim it at load.
 const wgsl = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ');
+
+// ?off=a,b skips features (for measuring their cost while developing)
+const OFF = new Set((typeof location !== 'undefined' ? new URLSearchParams(location.search).get('off') || '' : '').split(','));
 
 const halton = (i, b) => {
   let f = 1, r = 0;
@@ -36,6 +39,7 @@ export class Renderer {
     const d = this.device;
     this.q = quality;
     this.uniformBuf = d.createBuffer({ size: UBO_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.reflUbo = d.createBuffer({ size: UBO_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     // terrain textures
     const t = world.terrain;
@@ -146,7 +150,7 @@ export class Renderer {
       rock: this.#mesh(rockMesh()), crag: this.#mesh(cragMesh()),
       sheep: this.#mesh(sheepMesh()), eagle: this.#mesh(eagleMesh()),
       horse: this.#mesh(horseMesh().mesh), dog: this.#mesh(dogMesh().mesh), wolf: this.#mesh(wolfMesh().mesh),
-      tur: this.#mesh(turMesh().mesh), hay: this.#mesh(hayMesh()),
+      tur: this.#mesh(turMesh().mesh), rhodo: this.#mesh(rhodoMesh()),
     };
     this.fx = { buf: this.#buffer(world.structures.fx, GPUBufferUsage.VERTEX), count: world.structures.fxCount };
     const sets = world.scatter;
@@ -154,6 +158,23 @@ export class Renderer {
     for (const [k, s] of Object.entries({ ...sets, crags: world.structures.crags })) {
       this.sets[k] = { set: s, buf: this.#buffer(s.data, GPUBufferUsage.VERTEX) };
     }
+    // the mountain lake: a fan of triangles out past its shore
+    this.lake = null;
+    if (world.lake) {
+      const L = world.lake, y = L.level - 0.25, n = 72;
+      const verts = [L.x, y, L.z], idx = [];
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * Math.PI * 2, r = L.shore(a) + 5;
+        verts.push(L.x + Math.cos(a) * r, y, L.z + Math.sin(a) * r);
+      }
+      for (let i = 1; i <= n; i++) idx.push(0, i, i + 1);
+      this.lake = {
+        vb: this.#buffer(new Float32Array(verts), GPUBufferUsage.VERTEX),
+        ib: this.#buffer(new Uint32Array(idx), GPUBufferUsage.INDEX),
+        count: idx.length, x: L.x, z: L.z, y,
+      };
+    }
+    this.dummyColor = this.device.createTexture({ size: [1, 1], format: HDR, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
     this.water = {
       vb: this.#buffer(world.water.vertices, GPUBufferUsage.VERTEX),
       ib: this.#buffer(world.water.indices, GPUBufferUsage.INDEX),
@@ -230,10 +251,10 @@ export class Renderer {
       return d.createRenderPipeline({
         layout: this.pipeLayout,
         vertex: { module: m, entryPoint: opts.vs ?? 'vs', buffers: opts.buffers ?? [] },
-        fragment: { module: m, entryPoint: 'fs', targets: [{ format: HDR }] },
+        fragment: { module: m, entryPoint: 'fs', targets: [{ format: HDR }], constants: opts.clip ? { CLIP: 1 } : undefined },
         primitive: { topology: 'triangle-list', cullMode: opts.cull ?? 'none' },
         depthStencil: opts.depth ?? depthMain,
-        multisample: { count: msaa },
+        multisample: { count: opts.samples ?? msaa },
       });
     };
     this.pipes = {
@@ -244,6 +265,7 @@ export class Renderer {
       birds: make(S.BIRDS, { buffers: objVB }),
       sheep: make(S.OBJECTS, { buffers: objVB, vs: 'vs_animal', cull: 'back' }),
       wolves: make(S.OBJECTS, { buffers: objVB, vs: 'vs_wolf', cull: 'back' }),
+      bats: make(S.BIRDS, { buffers: objVB, vs: 'vs_bat' }),
       grass: make(S.GRASS, {}),
       water: make(S.WATER, { buffers: [{ arrayStride: 24, attributes: [
         { shaderLocation: 0, offset: 0, format: 'float32x3' },
@@ -267,6 +289,58 @@ export class Renderer {
       depthStencil: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'greater' },
       multisample: { count: msaa },
     });
+    // premultiplied-alpha blending for rain and snow
+    const alphaBlend = {
+      color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+      alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
+    };
+    const pm2 = mod(S.PRECIP);
+    this.precipPipe = d.createRenderPipeline({
+      layout: this.pipeLayout,
+      vertex: { module: pm2, entryPoint: 'vs' },
+      fragment: { module: pm2, entryPoint: 'fs', targets: [{ format: HDR, blend: alphaBlend }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'greater' },
+      multisample: { count: msaa },
+    });
+    this.alphaBlend = alphaBlend;
+    const bugs = mod(S.BUGS);
+    this.fireflyPipe = d.createRenderPipeline({
+      layout: this.pipeLayout,
+      vertex: { module: bugs, entryPoint: 'vs_firefly' },
+      fragment: { module: bugs, entryPoint: 'fs_firefly', targets: [{ format: HDR, blend: {
+        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
+      } }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'greater' },
+      multisample: { count: msaa },
+    });
+    this.butterflyPipe = d.createRenderPipeline({
+      layout: this.pipeLayout,
+      vertex: { module: bugs, entryPoint: 'vs_butterfly' },
+      fragment: { module: bugs, entryPoint: 'fs_butterfly', targets: [{ format: HDR }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: DEPTH, depthWriteEnabled: true, depthCompare: 'greater' },
+      multisample: { count: msaa },
+    });
+    // lake, and single-sample pipelines for the mirrored reflection pass
+    this.lakeLayout = d.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }] });
+    const lm = mod(S.LAKE);
+    this.lakePipe = d.createRenderPipeline({
+      layout: d.createPipelineLayout({ bindGroupLayouts: [this.layout, this.lakeLayout] }),
+      vertex: { module: lm, entryPoint: 'vs', buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }] },
+      fragment: { module: lm, entryPoint: 'fs', targets: [{ format: HDR }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: depthMain,
+      multisample: { count: msaa },
+    });
+    this.reflPipes = {
+      terrain: make(S.TERRAIN, { samples: 1, clip: true }),
+      far: make(S.FAR, { samples: 1, clip: true, buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }] }),
+      objects: make(S.OBJECTS, { samples: 1, clip: true, buffers: objVB, cull: 'none' }),
+      sky: make(S.SKY, { samples: 1, depth: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'equal' } }),
+    };
     const objMod = mod(S.OBJECTS);
     this.shadowPipe = d.createRenderPipeline({
       layout: this.pipeLayout,
@@ -299,8 +373,8 @@ export class Renderer {
     this.shadowSize = size;
     this.shadowTex?.destroy();
     this.shadowTex = d.createTexture({ size: [size, size], format: DEPTH, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
-    const entries = (shadowView) => [
-      { binding: 0, resource: { buffer: this.uniformBuf } },
+    const entries = (shadowView, ubo = this.uniformBuf) => [
+      { binding: 0, resource: { buffer: ubo } },
       { binding: 1, resource: this.heightTex.createView() },
       { binding: 2, resource: this.normalTex.createView() },
       { binding: 3, resource: this.splatTex.createView() },
@@ -311,6 +385,7 @@ export class Renderer {
     ];
     this.bindMain = d.createBindGroup({ layout: this.layout, entries: entries(this.shadowTex.createView()) });
     this.bindShadow = d.createBindGroup({ layout: this.layout, entries: entries(this.dummyDepth.createView()) });
+    this.bindReflect = d.createBindGroup({ layout: this.layout, entries: entries(this.shadowTex.createView(), this.reflUbo) });
   }
 
   setQuality(q) {
@@ -362,6 +437,15 @@ export class Renderer {
       this.history = null;
       this.postBGs = [postBG(this.hdr.createView())];
     }
+    // half-resolution mirror image of the scene for the lake
+    this.reflColor?.destroy(); this.reflDepth?.destroy();
+    this.reflColor = null; this.reflDepth = null;
+    if (this.lake && this.q.detail >= 1) {
+      const rw = Math.max(64, Math.floor(inW / 2)), rh = Math.max(36, Math.floor(inH / 2));
+      this.reflColor = d.createTexture({ size: [rw, rh], format: HDR, usage: RT | TB });
+      this.reflDepth = d.createTexture({ size: [rw, rh], format: DEPTH, usage: RT });
+    }
+    this.lakeBG = d.createBindGroup({ layout: this.lakeLayout, entries: [{ binding: 0, resource: (this.reflColor ?? this.dummyColor).createView() }] });
     this.resetHistory = true;
   }
 
@@ -423,6 +507,30 @@ export class Renderer {
     u.set([...env.skySun, env.glowStrength], 80);
     u.set([...env.glow, env.stars], 84);
     u.set([...env.moonDir, env.moon], 88);
+    u.set(env.season ?? [0, 0, 0, 0], 92);
+    u.set(env.weather ?? [0, 0, 0, 0], 96);
+    u.set([0, 0, env.lightningAz ?? 0, 0], 100);
+
+    // is the lake near and in view? then render its reflection this frame
+    let reflect = false, reflVP = null;
+    if (this.lake && this.reflColor) {
+      const lx = this.lake.x - cam.pos[0], lz = this.lake.z - cam.pos[2], dl = Math.hypot(lx, lz);
+      const facing = (lx * cam.fwd[0] + lz * cam.fwd[2]) / (dl || 1);
+      reflect = dl < 2200 && (facing > -0.2 || dl < 200) && cam.pos[1] > this.lake.y;
+    }
+    u[103] = reflect ? 1 : 0;
+    if (reflect) {
+      const L = this.lake.y;
+      // mirror the world in the plane y = L
+      const M = new Float32Array([1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 2 * L, 0, 1]);
+      reflVP = mat4mul(cleanViewProj, M);
+      const r = u.slice();
+      r.set(reflVP, 0);
+      r[33] = 2 * L - cam.pos[1];
+      r[37] = -r[37]; r[41] = -r[41]; r[45] = -r[45];
+      r[100] = L; r[101] = 1;
+      d.queue.writeBuffer(this.reflUbo, 0, r);
+    }
     d.queue.writeBuffer(this.uniformBuf, 0, u);
     d.queue.writeBuffer(this.postUbo, 0, new Float32Array([env.exposure, env.fade ?? 1, q.taa ? q.sharpen ?? 0.25 : 0, 0]));
 
@@ -447,7 +555,35 @@ export class Renderer {
       this.#bindMesh(pass, this.meshes.broad); near(this.sets.broad, 40);
       this.#bindMesh(pass, this.meshes.rock); near(this.sets.rocks, 20);
       this.#bindMesh(pass, this.meshes.crag); near(this.sets.crags, 100);
-      this.#bindMesh(pass, this.meshes.hay); near(this.sets.hay, 10);
+      pass.end();
+    }
+
+    // --- the lake's mirror image (terrain, far mountains, towers, sky)
+    if (reflect) {
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{ view: this.reflColor.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+        depthStencilAttachment: { view: this.reflDepth.createView(), depthClearValue: 0, depthLoadOp: 'clear', depthStoreOp: 'discard' },
+      });
+      pass.setBindGroup(0, this.bindReflect);
+      const rplanes = frustumPlanes(reflVP);
+      pass.setPipeline(this.reflPipes.terrain);
+      for (let ti = 0; ti < TILES * TILES; ti++) {
+        const tx = ti % TILES, tz = Math.floor(ti / TILES);
+        const x0 = MIN + tx * TILE_Q * CELL, z0 = MIN + tz * TILE_Q * CELL, s = TILE_Q * CELL;
+        if (!boxVisible(rplanes, x0, this.terrain.tileMin[ti], z0, x0 + s, this.terrain.tileMax[ti], z0 + s)) continue;
+        const dist = Math.hypot(Math.max(x0 - cam.pos[0], 0, cam.pos[0] - x0 - s), Math.max(z0 - cam.pos[2], 0, cam.pos[2] - z0 - s));
+        const lod = dist < 900 ? 1 : 2;
+        pass.setIndexBuffer(this.tileIdx[lod].buf, 'uint32');
+        pass.drawIndexed(this.tileIdx[lod].count, 1, 0, 0, ti * 4 + lod);
+      }
+      pass.setPipeline(this.reflPipes.objects);
+      pass.setVertexBuffer(0, this.structures.vb); pass.setIndexBuffer(this.structures.ib, 'uint32');
+      pass.setVertexBuffer(1, this.identity); pass.drawIndexed(this.structures.count, 1);
+      pass.setPipeline(this.reflPipes.far);
+      pass.setVertexBuffer(0, this.far.vb); pass.setIndexBuffer(this.far.ib, 'uint32');
+      pass.drawIndexed(this.far.count);
+      pass.setPipeline(this.reflPipes.sky);
+      pass.draw(3);
       pass.end();
     }
 
@@ -504,7 +640,7 @@ export class Renderer {
       split('broad', this.meshes.broad, this.meshes.broadLo, q.treeDist, q.treeLodDist);
       this.#bindMesh(pass, this.meshes.rock); this.#drawSet(pass, this.sets.rocks.set, this.sets.rocks.buf, vis(q.rockDist));
       this.#bindMesh(pass, this.meshes.crag); this.#drawSet(pass, this.sets.crags.set, this.sets.crags.buf, vis(1e9));
-      this.#bindMesh(pass, this.meshes.hay); this.#drawSet(pass, this.sets.hay.set, this.sets.hay.buf, vis(q.rockDist + 300));
+      if (!OFF.has('rhodo')) { this.#bindMesh(pass, this.meshes.rhodo); this.#drawSet(pass, this.sets.rhodo.set, this.sets.rhodo.buf, vis(q.rockDist)); }
 
       pass.setPipeline(this.pipes.sheep);
       this.#bindMesh(pass, this.meshes.sheep);
@@ -521,6 +657,14 @@ export class Renderer {
       pass.setVertexBuffer(1, this.sets.wolves.buf);
       pass.drawIndexed(this.meshes.wolf.count, this.sets.wolves.set.count);
 
+      pass.setPipeline(this.pipes.bats);
+      this.#bindMesh(pass, this.meshes.eagle);
+      pass.setVertexBuffer(1, this.sets.bats.buf);
+      pass.drawIndexed(this.meshes.eagle.count, this.sets.bats.set.count);
+
+      // butterflies over the meadows by day
+      if (!OFF.has('bugs')) { pass.setPipeline(this.butterflyPipe); pass.draw(12, q.butterflies); }
+
       pass.setPipeline(this.pipes.birds);
       this.#bindMesh(pass, this.meshes.eagle);
       pass.setVertexBuffer(1, this.sets.birds.buf);
@@ -530,10 +674,15 @@ export class Renderer {
       pass.setPipeline(this.pipes.water);
       pass.setVertexBuffer(0, this.water.vb); pass.setIndexBuffer(this.water.ib, 'uint32');
       pass.drawIndexed(this.water.count);
+      if (this.lake) {
+        pass.setPipeline(this.lakePipe);
+        pass.setBindGroup(1, this.lakeBG);
+        pass.setVertexBuffer(0, this.lake.vb); pass.setIndexBuffer(this.lake.ib, 'uint32');
+        pass.drawIndexed(this.lake.count);
+      }
 
       // grass around the camera
-      pass.setPipeline(this.pipes.grass);
-      pass.draw(9 * q.grassBlades, gn * gn);
+      if (!OFF.has('grass')) { pass.setPipeline(this.pipes.grass); pass.draw(9 * q.grassBlades, gn * gn); }
 
       // distant mountains, then the sky where nothing was drawn
       pass.setPipeline(this.pipes.far);
@@ -545,6 +694,14 @@ export class Renderer {
         pass.setPipeline(this.fxPipe);
         pass.setVertexBuffer(0, this.fx.buf);
         pass.draw(6, this.fx.count);
+      }
+      // fireflies after dark
+      if (!OFF.has('bugs')) { pass.setPipeline(this.fireflyPipe); pass.draw(6, q.fireflies); }
+      // rain or snow
+      const rain = env.weather ? env.weather[0] : 0;
+      if (rain > 0.01) {
+        pass.setPipeline(this.precipPipe);
+        pass.draw(6, Math.ceil(q.precipN * Math.min(1, rain * 1.5)));
       }
       pass.end();
     }

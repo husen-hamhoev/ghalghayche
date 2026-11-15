@@ -165,6 +165,62 @@ export function planWorld(t, seed = 7) {
   const waterfall = findWaterfall(t, rng);
   for (let i = 0; i < waterfall.length; i += 6) taken.push({ x: waterfall[i].x, z: waterfall[i].z, r: 9 });
 
+  // a mountain lake in a calm basin on a high shoulder
+  let lake = null;
+  {
+    let best = null, bestS = -1e9;
+    for (let i = 0; i < 2500; i++) {
+      const x = MIN + 300 + rng() * (SIZE - 600), z = MIN + 300 + rng() * (SIZE - 600);
+      const y = t.sample(x, z);
+      if (y < 1000 + V(1000) || y > 1000 + V(1550)) continue;
+      if (Math.min(distMain(x, z), distTrib(x, z)) < S(350)) continue;
+      if (villages.some((v) => Math.hypot(v.x - x, v.z - z) < 260) || Math.hypot(fold.x - x, fold.z - z) < 200) continue;
+      if (Math.hypot(x - TABLE.x, z - TABLE.z) < 650) continue; // keep the Table Mountain as it is
+      const rough = Math.max(t.roughness(x, z, 40), t.roughness(x, z, 80) * 0.6);
+      if (-rough > bestS) { bestS = -rough; best = { x, z }; }
+    }
+    if (best) {
+      const level = t.sample(best.x, best.z) - 0.5;
+      const phase = rng() * 6;
+      const R = 55;
+      const shore = t.carveLake(best.x, best.z, R, level, phase);
+      lake = { x: best.x, z: best.z, level, R, shore };
+      taken.push({ x: best.x, z: best.z, r: R * 1.3 + 12 });
+    }
+  }
+
+  // a glacier: it fills a high bowl (a cirque) above the snow line in the
+  // south and flows down the valley floor below it; then its meltwater
+  let glacier = [], melt = [];
+  {
+    let best = null, bestS = -1e9;
+    for (let i = 0; i < 4000; i++) {
+      const x = MIN + 250 + rng() * (SIZE - 500), z = S(1300) + rng() * (-MIN - 250 - S(1300));
+      const y = t.sample(x, z);
+      if (y < 1000 + V(1800) || y > 1000 + V(2700) || t.normal(x, z, 12)[1] < 0.7) continue;
+      let ring = 0;
+      for (let k = 0; k < 8; k++) ring += t.sample(x + Math.cos(k * 0.785) * 160, z + Math.sin(k * 0.785) * 160);
+      const bowl = ring / 8 - y; // positive: the ground around is higher
+      const sc = bowl + (y - 1000 - V(2000)) * 0.05;
+      if (bowl > 0 && sc > bestS) { bestS = sc; best = { x, z }; }
+    }
+    if (best) {
+      // start on the headwall: the highest ground around the bowl
+      let sx = best.x, sz = best.z, sy = -1e9;
+      for (let k = 0; k < 32; k++) {
+        for (const r of [180, 260, 340]) {
+          const x = best.x + Math.cos(k * 0.196) * r, z = best.z + Math.sin(k * 0.196) * r;
+          const y = t.sample(x, z);
+          if (y > sy && t.normal(x, z, 10)[1] > 0.55) { sy = y; sx = x; sz = z; }
+        }
+      }
+      glacier = traceValley(t, sx, sz, 1000 + V(1500)).slice(40); // skip the twisting drop off the headwall
+      const last = glacier[glacier.length - 1];
+      melt = traceDown(t, last.x, last.z);
+      for (let i = 0; i < glacier.length; i += 5) taken.push({ x: glacier[i].x, z: glacier[i].z, r: 45 });
+    }
+  }
+
   // ---- roads and paths --------------------------------------------------------
   const road = [];
   for (let z = MIN; z <= -MIN; z += 30) {
@@ -195,7 +251,7 @@ export function planWorld(t, seed = 7) {
   }
 
   const sites = [erzi, egikal, targim];
-  return { villages: [erzi, egikal, targim, vov], watch, sites, paths, taken, vov, table, erzi, egikal, targim, fold, bridge, mills, waterfall };
+  return { villages: [erzi, egikal, targim, vov], watch, sites, paths, taken, vov, table, erzi, egikal, targim, fold, bridge, mills, waterfall, lake, glacier, melt };
 }
 
 // Search the gorge walls for a long, steep drop and follow it downhill.
@@ -215,6 +271,24 @@ function findWaterfall(t, rng) {
   }
   return best || [];
 }
+// Downhill with momentum, so the ice keeps flowing across level stretches.
+function traceValley(t, x, z, minY) {
+  const pts = [];
+  let px = x, pz = z, dx = 0, dz = 0;
+  for (let i = 0; i < 700; i++) {
+    const y = t.sample(px, pz);
+    pts.push({ x: px, z: pz, y: y + 0.5 });
+    if (y < minY) break;
+    const gx = t.sample(px + 3, pz) - t.sample(px - 3, pz), gz = t.sample(px, pz + 3) - t.sample(px, pz - 3);
+    const g = Math.hypot(gx, gz) || 1;
+    let nx = -gx / g + dx * 1.5, nz = -gz / g + dz * 1.5;
+    const l = Math.hypot(nx, nz) || 1;
+    dx = nx / l; dz = nz / l;
+    px += dx * 1.6; pz += dz * 1.6;
+  }
+  return pts;
+}
+
 function traceDown(t, x, z) {
   const pts = [];
   let px = x, pz = z;
@@ -285,6 +359,42 @@ export function buildStructures(t, plan, surf, seed = 11) {
     litWindows(false);
     const cx = f.x + 18, cz = f.z + 9;
     fire([cx, t.sample(cx, cz) + 0.1, cz], 1.1, 0.37);
+  }
+
+  // the glacier: a tongue of ice hugging the slope, thick in the middle,
+  // with darker moraine along its edges, narrowing toward the snout
+  {
+    // smooth the traced path so the wide ribbon of ice cannot fold over itself
+    const raw = plan.glacier, W = 14;
+    const g = raw.map((_, i) => {
+      let x = 0, z = 0, n = 0;
+      for (let k = Math.max(0, i - W); k <= Math.min(raw.length - 1, i + W); k++) { x += raw[k].x; z += raw[k].z; n++; }
+      return { x: x / n, z: z / n };
+    });
+    const rows = [];
+    for (let i = 0; i < g.length; i += 4) {
+      const p = g[i], q = g[Math.min(i + 4, g.length - 1)], r = g[Math.max(i - 4, 0)];
+      const tx = q.x - r.x, tz = q.z - r.z, l = Math.hypot(tx, tz) || 1;
+      const nx = -tz / l, nz = tx / l;
+      const f = i / Math.max(1, g.length - 1);
+      const half = lerp(32, 12, f);
+      const row = [];
+      for (let c = 0; c <= 6; c++) {
+        const k = c / 3 - 1;
+        const x = p.x + nx * half * k, z = p.z + nz * half * k;
+        row.push([x, t.sample(x, z) + 0.6 + (1 - k * k) * 2.2 * (1 - f * 0.5), z, Math.abs(k)]);
+      }
+      rows.push(row);
+    }
+    b.at(0, 0, 0, 0);
+    for (let i = 0; i < rows.length - 1; i++) {
+      for (let c = 0; c < 6; c++) {
+        const a = rows[i][c], bb = rows[i][c + 1], cc = rows[i + 1][c + 1], dd = rows[i + 1][c];
+        const edge = Math.max(a[3], bb[3]);
+        const col = edge > 0.67 ? [0.34, 0.32, 0.3] : [0.52, 0.66, 0.78];
+        b.quad([a[0], a[1], a[2]], [bb[0], bb[1], bb[2]], [cc[0], cc[1], cc[2]], [dd[0], dd[1], dd[2]], col, 16); // faces up
+      }
+    }
   }
 
   // spray where the waterfall lands
@@ -413,26 +523,28 @@ export function scatter(t, plan, density = 1, seed = 23) {
     rocks.push([x, Math.min(y - sc * 0.25, low + sc * 0.1), z, tilt, sc, sc * (0.6 + rng() * 0.5), rng(), 1]);
   }
 
-  // haystacks on the terraced fields
-  const hay = [];
-  for (const v of [plan.erzi, plan.egikal, plan.targim]) {
-    for (let i = 0, n = 0; i < 600 && n < 16; i++) {
-      const a = rng() * 6.283, r = Math.sqrt(rng()) * v.fieldR;
-      const x = v.x + Math.cos(a) * r, z = v.z + Math.sin(a) * r;
-      if (splat(x, z)[1] < 0.35 || t.normal(x, z)[1] < 0.93 || near(x, z, 7)) continue;
-      const sc = 0.8 + rng() * 0.35;
-      hay.push([x, t.sample(x, z) - 0.2, z, rng() * 6.283, sc, sc * (0.9 + rng() * 0.2), rng(), 0]);
-      n++;
-    }
-  }
-
   // grazing animals: [x, y, z, rot, scale xz, scale y, seed, how far it wanders]
   const animal = (list, kind, x, z, wander, size = 1) => {
     const [sx, sy] = ANIMAL_SCALE[kind];
     const k = size * (0.9 + rng() * 0.2);
     list.push([x, t.sample(x, z), z, 0, sx * k, sy * k, rng(), wander]);
   };
-  const horses = [], dogs = [], tur = [], wolves = [];
+  const horses = [], dogs = [], tur = [], wolves = [], rhodo = [], bats = [];
+
+  // rhododendron patches on the high, cool slopes
+  for (let c = 0, tries = 0; c < 70 && tries < 5000; tries++) {
+    const x = MIN + 150 + rng() * (SIZE - 300), z = MIN + 150 + rng() * (SIZE - 300);
+    const y = t.sample(x, z), n = t.normal(x, z);
+    if (y < 1000 + V(780) || y > 1000 + V(1450) || n[1] < 0.72 || n[1] > 0.97 || nearVillage(x, z, 2)) continue;
+    for (let i = 0; i < 40; i++) {
+      const a = rng() * 6.283, r = Math.sqrt(rng()) * 26;
+      const px = x + Math.cos(a) * r, pz = z + Math.sin(a) * r;
+      if (t.normal(px, pz)[1] < 0.7 || near(px, pz, 3)) continue;
+      const sc = 0.7 + rng() * 0.7;
+      rhodo.push([px, t.sample(px, pz) - 0.15, pz, rng() * 6.283, sc, sc * (0.8 + rng() * 0.4), rng(), 0]);
+    }
+    c++;
+  }
 
   // flocks grazing the meadows near villages and at the sheepfold, each with a dog
   const flocks = [];
@@ -488,6 +600,11 @@ export function scatter(t, plan, density = 1, seed = 23) {
     const z = MIN + 300 + rng() * (SIZE - 600);
     bird(RIVER.x(z) + (rng() - 0.5) * 600, z, 70 + rng() * 200, 50 + rng() * 90);
   }
+  // bats around the villages, the sheepfold and the river after dusk
+  for (const [x, z] of [[plan.erzi.x, plan.erzi.z], [plan.erzi.x - 60, plan.erzi.z + 40], [plan.fold.x, plan.fold.z], [plan.targim.x, plan.targim.z], [RIVER.x(plan.erzi.z), plan.erzi.z]]) {
+    for (let i = 0; i < 3; i++) bats.push([x + (rng() - 0.5) * 30, t.sample(x, z) + 14 + rng() * 10, z + (rng() - 0.5) * 30, rng() * 100, 0, 0, 0, 0]);
+  }
+
   // bearded vultures soaring wide and high along the cliffs (size in the last slot)
   for (let i = 0; i < 4; i++) {
     const z = MIN + 500 + rng() * (SIZE - 1000);
@@ -498,8 +615,9 @@ export function scatter(t, plan, density = 1, seed = 23) {
   return {
     pines: new InstanceSet(pines), broad: new InstanceSet(broad), rocks: new InstanceSet(rocks),
     sheep: new InstanceSet(sheep, false), birds: new InstanceSet(birds, false),
-    hay: new InstanceSet(hay), horses: new InstanceSet(horses, false), dogs: new InstanceSet(dogs, false),
+    horses: new InstanceSet(horses, false), dogs: new InstanceSet(dogs, false),
     tur: new InstanceSet(tur, false), wolves: new InstanceSet(wolves, false),
+    rhodo: new InstanceSet(rhodo), bats: new InstanceSet(bats, false),
   };
 }
 
@@ -540,7 +658,7 @@ export function riverSurfaces(t) {
   return { mainZ, mainY, tribX, tribY, mainAt: (z) => at(mainZ, mainY, z), tribAt: (x) => at(tribX, tribY, x) };
 }
 
-export function buildWater(t, surf, waterfall = []) {
+export function buildWater(t, surf, waterfall = [], melt = []) {
   const verts = [], idx = [];
   // how far the water reaches to one side before the bank rises above it
   const reach = (x, z, nx, nz, y, r0, rMax) => {
@@ -578,6 +696,7 @@ export function buildWater(t, surf, waterfall = []) {
   ribbon(surf.tribX.map((x, i) => ({ x, z: TRIB.z(x), y: surf.tribY[i], w: S(12) })), true);
   counts.push(verts.length / 6);
   if (waterfall.length > 2) ribbon(waterfall.map((p, i) => ({ x: p.x, z: p.z, y: p.y + 0.3, w: 3.2 + Math.min(i, 40) * 0.07 })), false);
+  if (melt.length > 2) ribbon(melt.map((p, i) => ({ x: p.x, z: p.z, y: p.y + 0.2, w: 1.4 + Math.min(i, 60) * 0.02 })), false);
   return { vertices: new Float32Array(verts), indices: new Uint32Array(idx), counts };
 }
 

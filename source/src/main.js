@@ -50,13 +50,13 @@ async function main() {
   const structures = buildStructures(terrain, plan, surf);
   const viewpoints = makeViewpoints(terrain, plan);
   const sets = scatter(terrain, plan, 1);
-  const water = buildWater(terrain, surf, plan.waterfall);
+  const water = buildWater(terrain, surf, plan.waterfall, plan.melt);
   setProgress(0.88, 'Lighting the gorge');
   await tick();
 
   let quality = PRESETS[settings.quality];
   const renderer = new Renderer(device, context, format);
-  renderer.init({ terrain, structures, scatter: sets, water }, quality);
+  renderer.init({ terrain, structures, scatter: sets, water, lake: plan.lake }, quality);
   renderer.density = quality.density;
   // clock for the automatic day & night cycle (starts just before sunset)
   let clock = parseFloat(params.get('hour')) || 17.4;
@@ -274,6 +274,83 @@ async function main() {
     $('sound').textContent = on ? 'Sound: on' : 'Sound: off';
   };
   buildChoice($('time'), TIMES, settings.time, applyTime);
+
+  // ---- seasons and weather --------------------------------------------------------------
+  const SEASONS = [
+    { id: 'spring', label: 'Spring', v: [0, 0, 1, 0] },
+    { id: 'summer', label: 'Summer', v: [0, 0, 0, 0] },
+    { id: 'autumn', label: 'Autumn', v: [1, 0, 0, 0] },
+    { id: 'winter', label: 'Winter', v: [0, 1, 0, 0] },
+  ];
+  const WEATHERS = [
+    { id: 'clear', label: 'Clear' },
+    { id: 'changing', label: 'Changing' },
+    { id: 'rain', label: 'Rain' },
+  ];
+  if (!SEASONS.some((x) => x.id === settings.season)) settings.season = 'summer';
+  if (!WEATHERS.some((x) => x.id === settings.weather)) settings.weather = 'clear';
+  if (params.get('season')) settings.season = params.get('season');
+  if (params.get('weather')) settings.weather = params.get('weather');
+  buildChoice($('season'), SEASONS, settings.season, (id) => { settings.season = id; saveSettings(settings); renderer.resetHistory = true; });
+  buildChoice($('weather'), WEATHERS, settings.weather, (id) => { settings.weather = id; saveSettings(settings); wx.phase = 'clear'; wx.t = 0; });
+
+  // Weather state. "Changing" cycles: clear, clouds gather on the peaks, rain
+  // (snow in winter), then clearing, with a rainbow when the sun is low behind you.
+  const wx = { phase: 'clear', t: 0, dur: 50, rain: 0, cloud: 0, rainbow: 0, flashT: 9, nextFlash: 4, az: 0 };
+  const PHASES = { clear: ['gather', 20], gather: ['rain', 50], rain: ['clearing', 30], clearing: ['clear', 80] };
+  const updateWeather = (dt, sunUp) => {
+    let tr = 0, tc = 0, tb = 0;
+    if (settings.weather === 'rain') { tr = 1; tc = 1; }
+    else if (settings.weather === 'changing') {
+      wx.t += dt;
+      if (wx.t > wx.dur) {
+        const [next, dur] = PHASES[wx.phase];
+        wx.phase = next; wx.t = 0; wx.dur = dur * (0.8 + Math.random() * 0.6);
+      }
+      if (wx.phase === 'gather') tc = 1;
+      if (wx.phase === 'rain') { tc = 1; tr = 1; }
+      if (wx.phase === 'clearing') { tc = 0.25; tb = sunUp ? 1 : 0; }
+    }
+    const k = Math.min(1, dt * 0.2);
+    wx.rain += (tr - wx.rain) * k;
+    wx.cloud += (tc - wx.cloud) * k * 1.5;
+    wx.rainbow += (tb - wx.rainbow) * k;
+    // lightning and thunder in heavy rain (not in snow)
+    wx.flashT += dt;
+    if (wx.rain > 0.6 && settings.season !== 'winter') {
+      wx.nextFlash -= dt;
+      if (wx.nextFlash < 0) {
+        wx.nextFlash = 6 + Math.random() * 14;
+        wx.flashT = 0;
+        wx.az = (90 + Math.random() * 180) * Math.PI / 180;
+        audio.thunder(1 + Math.random() * 3, 0.5 + Math.random() * 0.5);
+      }
+    }
+    const f = wx.flashT;
+    return Math.max(0, 1 - f * 6) + (f > 0.15 && f < 0.32 ? 0.6 * (1 - (f - 0.15) / 0.17) : 0);
+  };
+  const grey = (c, k) => { const l = (c[0] + c[1] + c[2]) / 3; return c.map((v) => lerp(v, l * 0.75, k)); };
+  const withWeather = (e, flash) => {
+    const c = wx.cloud;
+    const season = SEASONS.find((x) => x.id === settings.season).v;
+    return {
+      ...e,
+      sunIntensity: e.sunIntensity * (1 - 0.75 * c),
+      ambient: e.ambient * (1 - 0.2 * c),
+      zenith: grey(e.zenith, 0.7 * c),
+      horizon: grey(e.horizon, 0.6 * c),
+      cloudCover: lerp(e.cloudCover, 0.97, c),
+      fogDensity: e.fogDensity * (1 + 1.8 * c),
+      mist: e.mist + 0.0008 * wx.rain,
+      exposure: e.exposure * (1 + 0.15 * c),
+      glowStrength: e.glowStrength * (1 - 0.7 * c),
+      moon: e.moon * (1 - 0.8 * c),
+      stars: e.stars * (1 - c),
+      weather: [wx.rain, c, flash, wx.rainbow * (e.skySun[1] > 0.02 && e.skySun[1] < 0.66 ? 1 : 0)],
+      season,
+      lightningAz: wx.az,
+    };
+  };
   $('sound').onclick = () => setSound(!settings.sound);
   $('sound').textContent = settings.sound ? 'Sound: on' : 'Sound: off';
   const vpList = $('views');
@@ -426,7 +503,9 @@ async function main() {
       if (menuOpen) $('time').querySelector('button:last-child').textContent = `Day & night · ${fmtClock(clock)}`;
     }
     env.fade = fade;
-    renderer.render(cam, env, time);
+    const flash = updateWeather(dt, env.skySun[1] > 0);
+    const renderEnv = withWeather(env, flash);
+    renderer.render(cam, renderEnv, time);
 
     // audio follows the camera
     const ground = terrain.sample(cam.pos[0], cam.pos[2]);
@@ -440,6 +519,7 @@ async function main() {
     audio.update(dt, {
       aboveGround: cam.pos[1] - ground, altitude: cam.pos[1], riverDist: rd,
       speed: v3.len(cam.vel), flockDist: flockD, forest: terrain.splat[(fj * N + fi) * 4 + 2] / 255,
+      rain: wx.rain, snow: settings.season === 'winter',
       night: env.stars, waterfallDist: nearestOn(plan.waterfall), fireDist: v3.len(v3.sub(cam.pos, campfire)),
       wolfDist: plan.wolves ? Math.hypot(cam.pos[0] - plan.wolves.x, cam.pos[2] - plan.wolves.z) : 1e9,
     });

@@ -6,17 +6,17 @@ export const PRESETS = {
   // Low is tuned for phones: no shadow map, light shaders.
   low: {
     label: 'Low', detail: 0, taa: true, scale: 0.62, maxDpr: 1.5, sharpen: 0.3, msaa: 1, shadowMap: false, shadow: 1024, shadowExtent: 220,
-    grassN: 140, grassSpacing: 0.8, grassBlades: 2, treeDist: 1000, treeLodDist: 200, rockDist: 450,
+    grassN: 140, grassSpacing: 0.8, grassBlades: 2, precipN: 1800, fireflies: 250, butterflies: 60, treeDist: 1000, treeLodDist: 200, rockDist: 450,
     lod: [300, 800], density: 0.4,
   },
   medium: {
     label: 'Medium', detail: 1, taa: true, scale: 0.6, maxDpr: 2, sharpen: 0.25, msaa: 4, shadowMap: true, shadow: 2048, shadowExtent: 300,
-    grassN: 240, grassSpacing: 0.6, grassBlades: 3, treeDist: 2000, treeLodDist: 420, rockDist: 900,
+    grassN: 240, grassSpacing: 0.6, grassBlades: 3, precipN: 4000, fireflies: 500, butterflies: 120, treeDist: 2000, treeLodDist: 420, rockDist: 900,
     lod: [520, 1400], density: 0.75,
   },
   high: {
     label: 'High', detail: 2, taa: true, scale: 0.75, maxDpr: 2, sharpen: 0.2, msaa: 4, shadowMap: true, shadow: 4096, shadowExtent: 380,
-    grassN: 380, grassSpacing: 0.5, grassBlades: 3, treeDist: 3400, treeLodDist: 750, rockDist: 1400,
+    grassN: 330, grassSpacing: 0.55, grassBlades: 3, precipN: 7000, fireflies: 800, butterflies: 180, treeDist: 3400, treeLodDist: 750, rockDist: 1400,
     lod: [800, 2000], density: 1.0,
   },
 };

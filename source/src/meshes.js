@@ -10,7 +10,10 @@ export const MAT = {
   STONE: 0, LEAF: 1, BARK: 2, DARK: 3, ROCK: 4, SLATE: 5, WOOL: 6, PLAIN: 7,
   HEAD: 8, LEG: 9, COAT: 10, // animals: the head dips to graze, legs swing
   LIT: 11, // window or door with warm firelight inside after dark
-  HAY: 12, WOOD: 13,
+  WOOD: 13,
+  LEAF2: 14, // broadleaf crowns: autumn colours, bare in winter
+  FLOWER: 15, // blossoms that only show in spring and summer
+  ICE: 16, // glacier ice
 };
 
 // Openings built while this is on glow warmly at night (inhabited houses).
@@ -417,13 +420,13 @@ export function broadleafMesh(lod) {
   const leaf = [0.075, 0.115, 0.035], bark = [0.24, 0.19, 0.15];
   b.cylinder(0, -0.5, 0, 0.26, 0.14, 4.5, lod ? 4 : 6, bark, MAT.BARK, false);
   if (lod) {
-    b.blob(0, 5.6, 0, 3.3, 3.2, 3.3, 0, leaf, MAT.LEAF, 0.2, 3);
+    b.blob(0, 5.6, 0, 3.3, 3.2, 3.3, 0, leaf, MAT.LEAF2, 0.2, 3);
   } else {
-    b.blob(0, 5.2, 0, 3.0, 2.6, 3.0, 1, leaf, MAT.LEAF, 0.3, 1);
-    b.blob(1.3, 6.8, 0.5, 2.2, 2.0, 2.2, 1, leaf, MAT.LEAF, 0.35, 7);
-    b.blob(-1.2, 6.5, -0.8, 2.3, 2.1, 2.3, 1, leaf, MAT.LEAF, 0.35, 13);
-    b.blob(0.3, 7.8, -0.2, 1.8, 1.6, 1.8, 1, leaf, MAT.LEAF, 0.35, 19);
-    b.blob(-0.6, 4.4, 1.5, 1.9, 1.5, 1.9, 1, leaf, MAT.LEAF, 0.35, 23);
+    b.blob(0, 5.2, 0, 3.0, 2.6, 3.0, 1, leaf, MAT.LEAF2, 0.3, 1);
+    b.blob(1.3, 6.8, 0.5, 2.2, 2.0, 2.2, 1, leaf, MAT.LEAF2, 0.35, 7);
+    b.blob(-1.2, 6.5, -0.8, 2.3, 2.1, 2.3, 1, leaf, MAT.LEAF2, 0.35, 13);
+    b.blob(0.3, 7.8, -0.2, 1.8, 1.6, 1.8, 1, leaf, MAT.LEAF2, 0.35, 19);
+    b.blob(-0.6, 4.4, 1.5, 1.9, 1.5, 1.9, 1, leaf, MAT.LEAF2, 0.35, 23);
   }
   return b.build();
 }
@@ -550,13 +553,18 @@ export function turMesh() {
   return normaliseAnimal(b, 0.95, 0.5);
 }
 
-// Hay stacked around a pole on the terraces.
-export function hayMesh() {
+// Caucasian rhododendron: a low, dense evergreen shrub with pale yellow
+// flower clusters, growing in patches on the high slopes.
+export function rhodoMesh() {
   const b = new MeshBuilder();
-  const hay = [0.4, 0.31, 0.14];
-  b.blob(0, 1.1, 0, 1.15, 1.25, 1.15, 1, hay, MAT.HAY, 0.08, 21);
-  b.cone(0, 1.6, 0, 1.05, 1.6, 7, hay, MAT.HAY, 0.05, 0.3);
-  b.cylinder(0, 2.8, 0, 0.05, 0.04, 1.0, 4, [0.22, 0.16, 0.1], MAT.WOOD, false);
+  const leaf = [0.05, 0.085, 0.04], bloom = [0.86, 0.8, 0.46];
+  b.blob(0, 0.35, 0, 0.9, 0.42, 0.8, 1, leaf, MAT.LEAF, 0.3, 31);
+  b.blob(0.55, 0.3, 0.3, 0.6, 0.32, 0.55, 0, leaf, MAT.LEAF, 0.3, 32);
+  b.blob(-0.5, 0.28, -0.25, 0.55, 0.3, 0.6, 0, leaf, MAT.LEAF, 0.3, 33);
+  for (let k = 0; k < 6; k++) {
+    const a = k * 2.4, r = 0.25 + (k % 3) * 0.25;
+    b.blob(Math.cos(a) * r, 0.62 + (k % 2) * 0.08, Math.sin(a) * r * 0.9, 0.13, 0.1, 0.13, 0, bloom, MAT.FLOWER, 0.1, 40 + k);
+  }
   return b.build();
 }
 

@@ -1,6 +1,6 @@
 // Generative soundscape of nature only, synthesised live with the Web Audio
 // API: mountain wind, the river and a waterfall, birdsong, a circling eagle,
-// grazing sheep and a crackling campfire. (A synthesised wolf howl sounded
+// grazing sheep, a crackling campfire, rain and thunder. (A synthesised wolf howl sounded
 // like a cartoon ghost, so the wolves stay silent.)
 
 export class Soundscape {
@@ -36,6 +36,8 @@ export class Soundscape {
     this.riverLo = this.#noiseVoice(noise, 'lowpass', 700, 0.5);
     this.riverHi = this.#noiseVoice(noise, 'bandpass', 2600, 0.9);
     this.fall = this.#noiseVoice(noise, 'bandpass', 700, 0.4);
+    this.rainLo = this.#noiseVoice(noise, 'lowpass', 1800, 0.5);
+    this.rainHi = this.#noiseVoice(noise, 'highpass', 4000, 0.5);
     this.fallHi = this.#noiseVoice(noise, 'highpass', 3000, 0.7);
     this.gust = 0.5; this.gustTarget = 0.5; this.t = 0;
   }
@@ -137,6 +139,30 @@ export class Soundscape {
     o.start(t0); vib.start(t0); o.stop(t); vib.stop(t);
   }
 
+  // Thunder: a crack, then a long rolling rumble, arriving after the flash.
+  thunder(delay, level) {
+    if (!this.ctx || this.ctx.state !== 'running') return;
+    const ctx = this.ctx, t0 = ctx.currentTime + delay;
+    const len = Math.floor(ctx.sampleRate * 6);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      let p = 0;
+      for (let i = 0; i < len; i++) {
+        p = p * 0.985 + (Math.random() * 2 - 1) * 0.15;
+        const t = i / ctx.sampleRate;
+        const roll = 0.6 + 0.4 * Math.sin(t * 3.1 + c) * Math.sin(t * 1.3);
+        d[i] = p * Math.exp(-t * 0.7) * roll;
+      }
+    }
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420;
+    lp.frequency.setValueAtTime(900, t0); lp.frequency.exponentialRampToValueAtTime(160, t0 + 2.5);
+    const g = ctx.createGain(); g.gain.value = 0.9 * level;
+    src.connect(lp).connect(g); g.connect(this.master); g.connect(this.reverb);
+    src.start(t0);
+  }
+
   // Campfire: short dry crackles.
   #crackle(level) {
     const ctx = this.ctx, t0 = ctx.currentTime;
@@ -199,6 +225,9 @@ export class Soundscape {
     const riverLvl = 0.5 / (1 + (r / 45) ** 2) + 0.03 / (1 + (r / 400) ** 2);
     this.riverLo.g.gain.setTargetAtTime(riverLvl, now, 0.3);
     this.riverHi.g.gain.setTargetAtTime(riverLvl * 0.35, now, 0.3);
+    const rainLvl = (env.rain ?? 0) * (env.snow ? 0.15 : 1);
+    this.rainLo.g.gain.setTargetAtTime(rainLvl * 0.22, now, 0.5);
+    this.rainHi.g.gain.setTargetAtTime(rainLvl * 0.1, now, 0.5);
     const fallLvl = 0.45 / (1 + ((env.waterfallDist ?? 1e9) / 70) ** 2);
     this.fall.g.gain.setTargetAtTime(fallLvl, now, 0.3);
     this.fallHi.g.gain.setTargetAtTime(fallLvl * 0.25, now, 0.3);

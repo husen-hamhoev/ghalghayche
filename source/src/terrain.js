@@ -202,6 +202,26 @@ export class Terrain {
     });
   }
 
+  // A lake basin: a bowl below the water level inside a wobbly shoreline, and a rim
+  // that stays above the water so the lake cannot spill or float.
+  carveLake(cx, cz, R, level, phase) {
+    const shore = (a) => R * (1 + 0.16 * Math.sin(3 * a + phase) + 0.09 * Math.sin(5 * a + phase * 2.3));
+    this.#forDisc(cx, cz, R * 1.3 + 45, (k, d) => {
+      const i = k % N, j = (k - i) / N;
+      const a = Math.atan2(MIN + j * CELL - cz, MIN + i * CELL - cx);
+      const r = shore(a);
+      if (d < r) {
+        const u = d / r;
+        this.h[k] = level - 0.6 - 7 * (1 - u * u);
+      } else {
+        const rim = level + 0.4 + (d - r) * 0.05;
+        const w = smoothstep(r + 8, r + 42, d);
+        this.h[k] = Math.max(lerp(rim, this.h[k], w), d < r + 12 ? level + 0.3 : -1e9);
+      }
+    });
+    return shore;
+  }
+
   // Agricultural terraces: quantise height into steps on moderate slopes.
   terrace(cx, cz, R, step) {
     this.#forDisc(cx, cz, R, (k, d) => {
