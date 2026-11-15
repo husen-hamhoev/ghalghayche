@@ -524,33 +524,55 @@ fn meteors(d: vec3f) -> vec3f {
   return c * night * smoothstep(-0.02, 0.12, d.y);
 }
 
-// The Milky Way (preview only, ?milkyway): a faint band along a great
-// circle, with a brighter, warmer core and dark dust lanes along its middle.
+// The Milky Way (preview only, ?milkyway): an arch from horizon to horizon.
+// Its bright, warm core sits low in the south; along it lie lumpy star
+// clouds, a dark rift of dust that splits the band near the core, finer dust
+// lanes, a few faint pink nebulae and a grain of countless faint stars.
+fn mwGrain(g: vec2f, salt: i32, density: f32) -> vec4f {
+  let cell = floor(g);
+  let hs = hashI(vec2i(cell) + vec2i(77 + salt, 191));
+  if (hs < 1.0 - density) { return vec4f(0.0); }
+  let jit = vec2f(hashI(vec2i(cell) + vec2i(5, 9 + salt)), hashI(vec2i(cell) + vec2i(13 + salt, 3))) * 0.6 + 0.2;
+  let b = smoothstep(0.5, 0.0, length(g - cell - jit)) * (0.3 + 0.7 * fract(hs * 37.0));
+  let tint = mix(vec3f(0.75, 0.83, 1.0), vec3f(1.0, 0.88, 0.72), fract(hs * 53.0));
+  return vec4f(tint * b, b);
+}
 fn milkyWay(d: vec3f) -> vec3f {
   if (u.extra2.y <= 0.0 || u.glow.w <= 0.0 || d.y < -0.05) { return vec3f(0.0); }
-  let G = normalize(vec3f(0.55, 0.42, 0.72)); // the band's pole
-  let A = normalize(cross(G, vec3f(0.0, 1.0, 0.0)));
-  let B = cross(G, A);
-  let lat = dot(d, G);
-  let lon = atan2(dot(d, B), dot(d, A));
-  let core = pow(max(dot(d, normalize(vec3f(-0.62, 0.18, 0.76))), 0.0), 3.0); // toward the galactic centre
-  let width = 0.13 + 0.09 * core;
-  let band = exp(-(lat * lat) / (width * width));
-  let q = vec2f(lon * 12.0, lat * 26.0);
-  let cloud = fbm(q, 4);
-  let dust = smoothstep(0.45, 0.72, fbm(q * 1.6 + vec2f(5.2, 1.3), 3)) * exp(-(lat * lat) / 0.004);
-  let glowL = band * (0.3 + 0.9 * cloud) * (1.0 - 0.8 * dust) * (0.5 + 1.5 * core);
-  // countless faint stars, far denser inside the band
-  let g = vec2f(lon * 420.0, lat * 420.0);
-  let cell = floor(g);
-  let hs = hashI(vec2i(cell) + vec2i(77, 191));
-  let jit = vec2f(hashI(vec2i(cell) + vec2i(5, 9)), hashI(vec2i(cell) + vec2i(13, 3))) * 0.6 + 0.2;
-  let dot1 = smoothstep(0.45, 0.0, length(g - cell - jit));
-  let dense = band * (1.0 - 0.7 * dust) * (0.6 + 0.8 * cloud);
-  let grain = dot1 * step(1.0 - 0.55 * dense, hs) * (0.4 + 0.6 * fract(hs * 37.0));
-  let col = mix(vec3f(0.62, 0.7, 0.95), vec3f(1.0, 0.86, 0.68), core);
-  let lum = glowL * 0.045 + grain * 0.22 * (0.6 + 0.8 * core);
-  return col * lum * u.glow.w * (1.0 - 0.55 * u.moon.w) * smoothstep(-0.05, 0.25, d.y);
+  let C = normalize(vec3f(-0.45, 0.28, 0.85)); // the galactic centre, low in the south
+  let G = normalize(cross(C, normalize(vec3f(0.55, 0.8, -0.25)))); // pole of the band
+  let E = cross(G, C);
+  let lat = asin(clamp(dot(d, G), -1.0, 1.0));
+  let lon = atan2(dot(d, E), dot(d, C)); // 0 at the centre
+  let al = abs(lon);
+  let w = 0.15 + 0.1 * exp(-al * al / 0.5);
+  let disk = exp(-(lat * lat) / (w * w));
+  let halo = exp(-(lat * lat) / (w * w * 5.0));
+  let bulge = exp(-(lon * lon) / 0.18 - (lat * lat) / 0.04);
+  if (halo + bulge < 0.025) { return vec3f(0.0); }
+  let tier = i32(u.params.w); // fewer noise octaves on lower detail levels
+  let q = vec2f(lon * 13.0, lat * 17.0);
+  // star clouds: lumpy brightness along the band
+  let lumps = smoothstep(0.3, 0.85, fbm(q + vec2f(3.1, 7.7), 3 + tier) * 0.5 + 0.5 * fbm(q * 2.3 + vec2f(1.7, 4.2), 1 + tier));
+  // the rift: a dark lane just off the middle, widening away from the core
+  let wob = fbm(vec2f(lon * 5.0, 2.7), 2) - 0.5;
+  let rc = 0.025 + 0.025 * sin(lon * 2.3 + 0.4) + 0.05 * wob;
+  let rw = (0.016 + 0.026 * smoothstep(0.0, 1.2, al)) * (0.75 + 0.6 * fbm(vec2f(lon * 7.0, 8.1), 2));
+  let rift = exp(-pow((lat - rc) / rw, 2.0)) * smoothstep(-0.6, -0.15, lon) * (1.0 - smoothstep(0.7, 1.7, lon));
+  let lanes = smoothstep(0.55, 0.78, fbm(q * 1.8 + vec2f(11.0, 2.0), 2 + tier)) * exp(-(lat * lat) / 0.01);
+  let dust = clamp(rift * (0.55 + 0.45 * fbm(q * 2.2 + 9.0, 1 + tier)) + lanes * 0.65, 0.0, 0.92);
+  let glowL = (disk * (0.2 + 1.0 * lumps) + bulge * 1.6) * (1.0 - dust) + halo * 0.18;
+  // colour: warm towards the core, cooler along the arms, faint pink nebulae
+  let warm = clamp(bulge * 1.4 + 0.3 * exp(-al * 1.2), 0.0, 1.0);
+  var col = mix(vec3f(0.64, 0.73, 1.0), vec3f(1.0, 0.84, 0.64), warm) * glowL * 0.085;
+  let neb = smoothstep(0.7, 0.9, vnoise(q * 1.9 + 4.0)) * smoothstep(0.4, 0.8, lumps) * disk * (1.0 - dust);
+  col += vec3f(0.95, 0.38, 0.5) * neb * 0.04;
+  // countless faint stars, densest where the band is brightest
+  let dens = clamp(glowL * 0.5, 0.0, 0.7);
+  let s1 = mwGrain(vec2f(lon, lat) * 430.0, 0, dens);
+  let s2 = mwGrain(vec2f(lon, lat) * 210.0, 7, dens * 0.25);
+  col += s1.rgb * 0.1 + s2.rgb * 0.22;
+  return col * u.glow.w * (1.0 - 0.45 * u.moon.w) * smoothstep(-0.05, 0.22, d.y);
 }
 
 // The moon: a large, bright disk with maria and a darkened limb.
