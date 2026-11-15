@@ -510,23 +510,26 @@ export function scatter(t, plan, density = 1, seed = 23) {
 // it flows on. (The river formulas alone can disagree with the terrain where
 // valleys meet.) Returned heights are also used by the bridge and the mills.
 export function riverSurfaces(t) {
-  const section = (x, z, nx, nz, r) => {
+  // fill the channel up to the lower of its two banks at the river's width,
+  // but no shallower than 0.3 m and no deeper than 2.2 m
+  const section = (x, z, nx, nz, r, half) => {
     let low = 1e9;
     for (let k = -4; k <= 4; k++) low = Math.min(low, t.sample(x + nx * r * k / 4, z + nz * r * k / 4));
-    return low + 0.45;
+    const bank = Math.min(t.sample(x - nx * half, z - nz * half), t.sample(x + nx * half, z + nz * half));
+    return clamp(bank - 0.08, low + 0.3, low + 2.2);
   };
   const mainZ = [], mainY = [];
   for (let z = MIN; z <= -MIN; z += 4) {
     const d = RIVER.dx(z), l = Math.hypot(1, d);
     mainZ.push(z);
-    mainY.push(section(RIVER.x(z), z, 1 / l, -d / l, RIVER.width(z) * 0.35));
+    mainY.push(section(RIVER.x(z), z, 1 / l, -d / l, RIVER.width(z) * 0.35, RIVER.width(z) * 0.5 + 2));
   }
   for (let i = mainY.length - 2; i >= 0; i--) mainY[i] = Math.min(mainY[i], mainY[i + 1]); // flows north (-z)
   const tribX = [], tribY = [];
   for (let x = TRIB.xj; x <= -MIN; x += 3) {
     const d = TRIB.dz(x), l = Math.hypot(1, d);
     tribX.push(x);
-    tribY.push(section(x, TRIB.z(x), -d / l, 1 / l, TRIB.width() * 1.2));
+    tribY.push(section(x, TRIB.z(x), -d / l, 1 / l, TRIB.width() * 1.2, TRIB.width() * 0.5 + 1.5));
   }
   for (let i = tribY.length - 2; i >= 0; i--) tribY[i] = Math.min(tribY[i], tribY[i + 1]); // flows west
   const at = (xs, ys, v) => {
@@ -544,7 +547,7 @@ export function buildWater(t, surf, waterfall = []) {
     for (let r = r0; r <= rMax; r += 1) {
       const h = t.sample(x + nx * r, z + nz * r);
       if (h > y + 0.12) return r + 0.8; // bank rises: tuck the edge under it
-      if (h < y - 0.25) return Math.max(0.3, r - 1); // ground falls away: stop short
+      if (h < y - 2.4) return Math.max(0.5, r - 1); // ground drops away deeper than any riverbed: stop short
     }
     return rMax;
   };

@@ -277,8 +277,8 @@ export class Terrain {
         }
         const dm = distMain(x, z), dt = x > TRIB.xj - 30 ? distTrib(x, z) : 1e9;
         const gravel = Math.max(
-          1 - smoothstep(RIVER.width(z) * 0.5, RIVER.width(z) * 0.5 + 16, dm),
-          1 - smoothstep(3, 11, dt),
+          1 - smoothstep(RIVER.width(z) * 0.5 + 1, RIVER.width(z) * 0.5 + 8, dm),
+          1 - smoothstep(3, 7, dt),
         );
         splat[k * 4 + 1] = g * 255;
         splat[k * 4 + 2] = this.forest(x, z, h[k], n) * 255 * (1 - g * 0.9);
