@@ -920,7 +920,20 @@ fn aces(x: vec3f) -> vec3f {
   return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
 }
 @fragment fn fs(in: VOut) -> @location(0) vec4f {
-  var c = textureSampleLevel(hdr, samp, in.uv, 0.0).rgb * p.exposure.x;
+  var c = textureSampleLevel(hdr, samp, in.uv, 0.0).rgb;
+  // light sharpening after temporal upscaling (exposure.z = strength)
+  if (p.exposure.z > 0.0) {
+    let px = 1.0 / vec2f(textureDimensions(hdr));
+    let n = textureSampleLevel(hdr, samp, in.uv + vec2f(0.0, -px.y), 0.0).rgb;
+    let s = textureSampleLevel(hdr, samp, in.uv + vec2f(0.0, px.y), 0.0).rgb;
+    let e = textureSampleLevel(hdr, samp, in.uv + vec2f(px.x, 0.0), 0.0).rgb;
+    let w = textureSampleLevel(hdr, samp, in.uv + vec2f(-px.x, 0.0), 0.0).rgb;
+    let mn = min(min(min(n, s), min(e, w)), c);
+    let mx = max(max(max(n, s), max(e, w)), c);
+    let sharp = c + (4.0 * c - n - s - e - w) * p.exposure.z;
+    c = clamp(sharp, mn, mx);
+  }
+  c *= p.exposure.x;
   let l = dot(c, vec3f(0.2126, 0.7152, 0.0722));
   c = mix(vec3f(l), c, 1.08);
   c = aces(c);
@@ -933,5 +946,116 @@ fn aces(x: vec3f) -> vec3f {
   let n = fract(sin(dot(in.pos.xy, vec2f(12.9898, 78.233))) * 43758.5453);
   c += (n - 0.5) / 255.0;
   return vec4f(c, 1.0);
+}
+`;
+
+// ---- temporal upscaling ----------------------------------------------------------------
+// The scene is rendered at reduced resolution with a different sub-pixel
+// jitter every frame. This pass reprojects last frame's full-resolution
+// result with depth and the previous camera, blends in the new samples
+// (weighted by how close each landed to the output pixel), and clamps the
+// history to the current neighbourhood so moving things do not ghost.
+export const TAA = /* wgsl */ `
+struct R {
+  invViewProj: mat4x4f, // current, without jitter
+  prevViewProj: mat4x4f,
+  jitter: vec4f,        // jitter x, y (input pixels, +y down), reset, unused
+  size: vec4f,          // input w, h, output w, h
+};
+@group(0) @binding(0) var<uniform> r: R;
+@group(0) @binding(1) var cur: texture_2d<f32>;
+@group(0) @binding(2) var depthTex: texture_depth_2d;
+@group(0) @binding(3) var hist: texture_2d<f32>;
+@group(0) @binding(4) var samp: sampler;
+
+struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+  let q = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
+  var o: VOut;
+  o.pos = vec4f(q * 2.0 - 1.0, 0.0, 1.0);
+  o.uv = vec2f(q.x, 1.0 - q.y);
+  return o;
+}
+
+fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
+// Blend in a compressed space so bright highlights do not dominate.
+fn squash(c: vec3f) -> vec3f { return c / (1.0 + luma(c)); }
+fn unsquash(c: vec3f) -> vec3f { return c / max(1.0 - luma(c), 1e-3); }
+
+// Catmull-Rom history fetch from 5 bilinear taps: keeps the history sharp.
+fn historyAt(uv: vec2f) -> vec3f {
+  let size = r.size.zw;
+  let p = uv * size;
+  let t1 = floor(p - 0.5) + 0.5;
+  let f = p - t1;
+  let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  let w3 = f * f * (-0.5 + 0.5 * f);
+  let w12 = w1 + w2;
+  let o12 = w2 / w12;
+  let t0 = (t1 - 1.0) / size;
+  let t3 = (t1 + 2.0) / size;
+  let t12 = (t1 + o12) / size;
+  var c = vec3f(0.0);
+  c += textureSampleLevel(hist, samp, vec2f(t12.x, t0.y), 0.0).rgb * w12.x * w0.y;
+  c += textureSampleLevel(hist, samp, vec2f(t0.x, t12.y), 0.0).rgb * w0.x * w12.y;
+  c += textureSampleLevel(hist, samp, vec2f(t12.x, t12.y), 0.0).rgb * w12.x * w12.y;
+  c += textureSampleLevel(hist, samp, vec2f(t3.x, t12.y), 0.0).rgb * w3.x * w12.y;
+  c += textureSampleLevel(hist, samp, vec2f(t12.x, t3.y), 0.0).rgb * w12.x * w3.y;
+  let wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+  return max(c / wsum, vec3f(0.0));
+}
+
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+  let inSize = r.size.xy;
+  let J = r.jitter.xy;
+  let pIn = in.uv * inSize;
+  let ic = vec2i(floor(pIn + J));
+  let maxI = vec2i(inSize) - 1;
+
+  var sum = vec3f(0.0);
+  var wsum = 0.0;
+  var wmax = 0.0;
+  var m1 = vec3f(0.0);
+  var m2 = vec3f(0.0);
+  var zmax = 0.0;
+  for (var j = -1; j <= 1; j++) {
+    for (var i = -1; i <= 1; i++) {
+      let t = clamp(ic + vec2i(i, j), vec2i(0), maxI);
+      let c = squash(textureLoad(cur, t, 0).rgb);
+      let s = vec2f(t) + 0.5 - J;
+      let d = pIn - s;
+      let w = exp(-2.2 * dot(d, d));
+      sum += c * w;
+      wsum += w;
+      wmax = max(wmax, w);
+      m1 += c;
+      m2 += c * c;
+      zmax = max(zmax, textureLoad(depthTex, t, 0)); // reverse-Z: nearest surface
+    }
+  }
+  let current = sum / max(wsum, 1e-5);
+
+  // reproject with the nearest depth around the pixel (keeps edges clean)
+  let ndc = vec2f(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+  let world = r.invViewProj * vec4f(ndc, zmax, 1.0);
+  let prev = r.prevViewProj * world;
+  var puv = vec2f(-1.0);
+  if (prev.w > 1e-6) { puv = vec2f(prev.x / prev.w * 0.5 + 0.5, 0.5 - prev.y / prev.w * 0.5); }
+  let inside = all(puv > vec2f(0.0)) && all(puv < vec2f(1.0));
+  if (r.jitter.z > 0.5 || !inside) { return vec4f(unsquash(current), 1.0); }
+
+  // clip history to the neighbourhood's colour range
+  let mean = m1 / 9.0;
+  let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3f(0.0)));
+  let lo = mean - sigma * 1.25;
+  let hi = mean + sigma * 1.25;
+  let h = clamp(squash(historyAt(puv)), lo, hi);
+
+  // more weight to well-placed samples, and more when the image moves fast
+  let motion = length((puv - in.uv) * r.size.zw);
+  let alpha = clamp(0.03 + 0.1 * wmax + motion * 0.01, 0.03, 0.4);
+  return vec4f(unsquash(mix(h, current, alpha)), 1.0);
 }
 `;

@@ -6,7 +6,7 @@ import { Renderer } from './renderer.js';
 import { Soundscape } from './audio.js';
 import { PRESETS, ORDER, loadSettings, saveSettings, AutoQuality } from './quality.js';
 import { TIMES, environment } from './env.js';
-import { perspectiveRZ, clamp, lerp, smoothstep, v3 } from './math.js';
+import { perspectiveRZ, viewFromBasis, mat4mul, clamp, lerp, smoothstep, v3 } from './math.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -140,6 +140,7 @@ async function main() {
   let dragging = false;
   canvas.addEventListener('mousedown', () => {
     if (!started || menuOpen) return;
+    if (document.pointerLockElement === canvas && aimed >= 0) { stopTour(); flyTo(aimed); return; }
     if (canvas.requestPointerLock) {
       const p = canvas.requestPointerLock();
       if (p && p.catch) p.catch(() => { dragging = true; });
@@ -257,6 +258,7 @@ async function main() {
     settings.time = id; saveSettings(settings);
     env = environment(TIMES.find((t) => t.id === id));
     renderer.computeLight(env.sunDir);
+    renderer.resetHistory = true;
   };
   const setSound = (on) => {
     settings.sound = on; saveSettings(settings);
@@ -274,6 +276,56 @@ async function main() {
     vpList.appendChild(b);
   });
   $('resume').onclick = () => toggleMenu(false);
+
+  // ---- checkpoints in the sky: tap or click one to fly there -----------------
+  let aimed = -1;
+  const marks = viewpoints.map((vp, i) => {
+    const el = document.createElement('button');
+    el.className = 'mark';
+    el.setAttribute('aria-label', `Fly to ${vp.name}`);
+    el.innerHTML = `<span class="ring">${i + 1}</span><span class="name">${vp.name}</span><span class="stem"></span>`;
+    el.addEventListener('click', (e) => { e.stopPropagation(); stopTour(); flyTo(i); });
+    el.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); stopTour(); flyTo(i); });
+    $('marks').appendChild(el);
+    return { el, vp, w: 0, h: 0 };
+  });
+  const updateMarks = () => {
+    const vpm = mat4mul(cam.proj, viewFromBasis(cam.pos, cam.right, cam.up, cam.fwd));
+    const W = innerWidth, H = innerHeight;
+    const locked = document.pointerLockElement === canvas;
+    let best = -1, bestD = 55;
+    marks.forEach((m, i) => {
+      const [x, y, z] = m.vp.anchor;
+      const cw = vpm[3] * x + vpm[7] * y + vpm[11] * z + vpm[15];
+      const dist = Math.hypot(x - cam.pos[0], y - cam.pos[1], z - cam.pos[2]);
+      const here = v3.len(v3.sub(cam.pos, m.vp.pos)) < 40 || dist < 120;
+      if (cw <= 0.5 || here) { m.el.style.visibility = 'hidden'; return; }
+      const cx = vpm[0] * x + vpm[4] * y + vpm[8] * z + vpm[12];
+      const cy = vpm[1] * x + vpm[5] * y + vpm[9] * z + vpm[13];
+      const sx = (cx / cw * 0.5 + 0.5) * W, sy = (0.5 - cy / cw * 0.5) * H;
+      if (sx < -150 || sx > W + 150 || sy < -150 || sy > H + 150) { m.el.style.visibility = 'hidden'; return; }
+      // dim it when the land is in the way
+      let blocked = false;
+      for (let k = 1; k < 28 && !blocked; k++) {
+        const f = k / 28;
+        const px = lerp(cam.pos[0], x, f), py = lerp(cam.pos[1], y, f), pz = lerp(cam.pos[2], z, f);
+        if (terrain.sample(px, pz) > py + 3) blocked = true;
+      }
+      if (!m.w) { m.w = m.el.offsetWidth; m.h = m.el.offsetHeight; }
+      const sc = clamp(900 / dist, 0.85, 1.2);
+      m.el.style.visibility = 'visible';
+      m.el.style.transform = `translate(${sx - (m.w * sc) / 2}px, ${sy - m.h * sc}px) scale(${sc})`;
+      m.el.classList.toggle('hidden-by-land', blocked);
+      // the ring's centre, for aiming with the mouse captured
+      const ringY = sy - m.h * sc + 17 * sc;
+      const d = Math.hypot(sx - W / 2, ringY - H / 2);
+      if (locked && d < bestD) { bestD = d; best = i; }
+    });
+    if (best !== aimed) {
+      marks.forEach((m, i) => m.el.classList.toggle('aim', i === best));
+      aimed = best;
+    }
+  };
   $('tour').onclick = () => { toggleMenu(false); if (tour.on) stopTour(); else startTour(); };
 
   function toggleMenu(force) {
@@ -300,7 +352,8 @@ async function main() {
     if (started) return;
     started = true;
     $('loader').classList.add('gone');
-    if (coarse) { $('touch').hidden = false; $('hint').textContent = 'Left stick to fly · drag to look · ☰ for menu'; }
+    $('marks').hidden = false;
+    if (coarse) { $('touch').hidden = false; $('hint').textContent = 'Tap a checkpoint to fly there · left stick to fly · drag to look'; }
     $('hint').classList.add('show');
     setTimeout(() => $('hint').classList.remove('show'), 7000);
     if (!AUTO) {
@@ -327,14 +380,21 @@ async function main() {
     last = now;
     const time = (now - t0) / 1000;
 
+    const before = [...cam.pos], yawBefore = cam.yaw;
     updateCamera(dt);
+    if (v3.len(v3.sub(cam.pos, before)) > 60 || Math.abs(cam.yaw - yawBefore) > 0.6) renderer.resetHistory = true;
     if (started && !menuOpen) auto.update(dt);
 
+    // With temporal upscaling the canvas is drawn at the output density and
+    // the scene at a fraction of it; without, both use the same scaled size.
     const dpr = Math.min(devicePixelRatio || 1, quality.maxDpr);
-    const scale = quality.scale * auto.scale * dpr;
-    const w = Math.max(320, Math.round(innerWidth * scale)), h = Math.max(180, Math.round(innerHeight * scale));
-    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-    renderer.resize(w, h);
+    const taa = quality.taa;
+    const outScale = taa ? dpr : quality.scale * auto.scale * dpr;
+    const ow = Math.max(320, Math.round(innerWidth * outScale)), oh = Math.max(180, Math.round(innerHeight * outScale));
+    const k = taa ? quality.scale * auto.scale : 1;
+    const w = Math.max(240, Math.round(ow * k)), h = Math.max(135, Math.round(oh * k));
+    if (canvas.width !== ow || canvas.height !== oh) { canvas.width = ow; canvas.height = oh; }
+    renderer.resize(ow, oh, w, h);
     cam.proj = perspectiveRZ(cam.fov, w / h, 0.3);
 
     fade = Math.min(1, fade + dt * 0.6);
@@ -355,6 +415,7 @@ async function main() {
       speed: v3.len(cam.vel), flockDist: flockD, forest: terrain.splat[(fj * N + fi) * 4 + 2] / 255,
     });
 
+    if (started) updateMarks();
     if (captionTimer > 0) { captionTimer -= dt; if (captionTimer <= 0) $('caption').classList.remove('show'); }
 
     frames++; fpsT += dt;
@@ -362,7 +423,7 @@ async function main() {
       fps = frames / fpsT; frames = 0; fpsT = 0;
       if (!$('stats').hidden) {
         $('stats').textContent =
-          `${fps.toFixed(0)} fps · ${(1000 / fps).toFixed(1)} ms\n${w}×${h} · ${quality.label}${settings.auto ? ' (auto)' : ''} · scale ${auto.scale.toFixed(2)}\n` +
+          `${fps.toFixed(0)} fps · ${(1000 / fps).toFixed(1)} ms\n${w}×${h}${taa ? ` → ${ow}×${oh}` : ''} · ${quality.label}${settings.auto ? ' (auto)' : ''} · scale ${auto.scale.toFixed(2)}\n` +
           `draws ${renderer.stats.draws} · instances ${renderer.stats.instances}\n` +
           `x ${cam.pos[0].toFixed(0)} z ${cam.pos[2].toFixed(0)} · ${cam.pos[1].toFixed(0)} m`;
       }

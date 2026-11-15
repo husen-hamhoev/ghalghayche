@@ -1,23 +1,29 @@
 // Detail levels, saved settings and automatic fallback on slow devices.
 
+// With temporal upscaling (taa) the canvas uses up to maxDpr pixels per CSS
+// pixel and the scene renders at `scale` of that; msaa is the fallback path.
 export const PRESETS = {
-  // Low is tuned for phones: no shadow map, no MSAA, light shaders.
+  // Low is tuned for phones: no shadow map, light shaders.
   low: {
-    label: 'Low', detail: 0, scale: 0.72, maxDpr: 1.5, msaa: 1, shadowMap: false, shadow: 1024, shadowExtent: 220,
+    label: 'Low', detail: 0, taa: true, scale: 0.62, maxDpr: 1.5, sharpen: 0.3, msaa: 1, shadowMap: false, shadow: 1024, shadowExtent: 220,
     grassN: 140, grassSpacing: 0.8, grassBlades: 2, treeDist: 1000, treeLodDist: 200, rockDist: 450,
     lod: [300, 800], density: 0.4,
   },
   medium: {
-    label: 'Medium', detail: 1, scale: 0.85, maxDpr: 1.5, msaa: 4, shadowMap: true, shadow: 2048, shadowExtent: 300,
+    label: 'Medium', detail: 1, taa: true, scale: 0.6, maxDpr: 2, sharpen: 0.25, msaa: 4, shadowMap: true, shadow: 2048, shadowExtent: 300,
     grassN: 240, grassSpacing: 0.6, grassBlades: 3, treeDist: 2000, treeLodDist: 420, rockDist: 900,
     lod: [520, 1400], density: 0.75,
   },
   high: {
-    label: 'High', detail: 2, scale: 1.0, maxDpr: 2, msaa: 4, shadowMap: true, shadow: 4096, shadowExtent: 380,
+    label: 'High', detail: 2, taa: true, scale: 0.75, maxDpr: 2, sharpen: 0.2, msaa: 4, shadowMap: true, shadow: 4096, shadowExtent: 380,
     grassN: 380, grassSpacing: 0.5, grassBlades: 3, treeDist: 3400, treeLodDist: 750, rockDist: 1400,
     lod: [800, 2000], density: 1.0,
   },
 };
+// ?taa=0 switches temporal upscaling off (old path: MSAA, scene at canvas size)
+if (typeof location !== 'undefined' && new URLSearchParams(location.search).get('taa') === '0') {
+  for (const [k, p] of Object.entries({ low: 0.72, medium: 0.85, high: 1.0 })) { PRESETS[k].taa = false; PRESETS[k].scale = p; PRESETS[k].maxDpr = k === 'high' ? 2 : 1.5; }
+}
 export const ORDER = ['low', 'medium', 'high'];
 
 const KEY = 'ghalghaiche.settings';

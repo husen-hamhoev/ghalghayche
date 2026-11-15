@@ -419,6 +419,17 @@ export function makeViewpoints(t, plan) {
     const tz = S(900), tx = RIVER.x(tz);
     vps.push(look('Myat-Loam', 'The Table Mountain, high above the gorge', from, [tx, RIVER.bed(tz) + V(700), tz]));
   }
+  // where each checkpoint floats in the sky: above the place itself
+  const anchors = [
+    [erzi.x, erzi.h + 70, erzi.z],
+    [egikal.x, egikal.h + 65, egikal.z],
+    [(vov.pillars[0].x + vov.pillars[1].x) / 2, vov.pillars[0].top + 60, (vov.pillars[0].z + vov.pillars[1].z) / 2],
+    [targim.cryptCentre.x, t.sample(targim.cryptCentre.x, targim.cryptCentre.z) + 60, targim.cryptCentre.z],
+    [vps[4].pos[0], vps[4].pos[1] + 25, vps[4].pos[2]],
+    [TABLE.x, t.sample(TABLE.x, TABLE.z) + 70, TABLE.z],
+  ];
+  vps.forEach((vp, i) => { vp.anchor = anchors[i]; });
+
   // keep a clearing around each viewpoint so no tree blocks the view
   for (const vp of vps) plan.taken.push({ x: vp.pos[0], z: vp.pos[2], r: 30 });
   return vps;

@@ -2,7 +2,7 @@
 
 import * as S from './shaders.js';
 import { N, CELL, MIN, SIZE, TILES, TILE_Q } from './terrain.js';
-import { mat4mul, ortho, viewFromBasis, frustumPlanes, boxVisible, v3 } from './math.js';
+import { mat4mul, mat4invert, ortho, viewFromBasis, frustumPlanes, boxVisible, v3 } from './math.js';
 import { pineMesh, broadleafMesh, rockMesh, cragMesh, sheepMesh, eagleMesh } from './meshes.js';
 
 const HDR = 'rgba16float';
@@ -12,6 +12,12 @@ const UBO_SIZE = 368;
 // WGSL template literals carry lots of indentation; trim it at load.
 const wgsl = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ');
 
+const halton = (i, b) => {
+  let f = 1, r = 0;
+  while (i > 0) { f /= b; r += f * (i % b); i = Math.floor(i / b); }
+  return r;
+};
+
 export class Renderer {
   constructor(device, context, format) {
     this.device = device;
@@ -19,6 +25,10 @@ export class Renderer {
     this.format = format;
     this.ubo = new Float32Array(UBO_SIZE / 4);
     this.stats = { draws: 0, instances: 0 };
+    this.frame = 0;
+    this.histIndex = 0;
+    this.resetHistory = true;
+    this.prevViewProj = null;
   }
 
   // ---- setup ----------------------------------------------------------------
@@ -191,7 +201,7 @@ export class Renderer {
         { shaderLocation: 4, offset: 16, format: 'float32x4' },
       ] },
     ];
-    const msaa = this.q.msaa;
+    const msaa = this.q.taa ? 1 : this.q.msaa;
     const depthMain = { format: DEPTH, depthWriteEnabled: true, depthCompare: 'greater' };
     const make = (code, opts) => {
       const m = mod(code);
@@ -235,6 +245,15 @@ export class Renderer {
       primitive: { topology: 'triangle-list' },
     });
     this.postUbo = d.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+    const tm = mod(S.TAA);
+    this.taaPipe = d.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module: tm, entryPoint: 'vs' },
+      fragment: { module: tm, entryPoint: 'fs', targets: [{ format: HDR }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    this.taaUbo = d.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   }
 
   #initShadow(size) {
@@ -257,30 +276,55 @@ export class Renderer {
   }
 
   setQuality(q) {
-    const msaaChanged = q.msaa !== this.q.msaa;
+    const msaaChanged = q.msaa !== this.q.msaa || q.taa !== this.q.taa;
     const shadowChanged = q.shadow !== this.shadowSize;
     this.q = q;
     if (msaaChanged) { this.#initPipelines(); this.width = 0; }
     if (shadowChanged) this.#initShadow(q.shadow);
+    this.resetHistory = true;
   }
 
-  resize(w, h) {
-    if (w === this.width && h === this.height) return;
-    this.width = w; this.height = h;
+  // outW x outH is the canvas; the scene renders at inW x inH (smaller when
+  // temporal upscaling is on, the same otherwise).
+  resize(outW, outH, inW = outW, inH = outH) {
+    if (outW === this.outW && outH === this.outH && inW === this.width && inH === this.height) return;
+    this.outW = outW; this.outH = outH;
+    this.width = inW; this.height = inH;
     const d = this.device;
-    this.hdrMS?.destroy(); this.hdr?.destroy(); this.depth?.destroy();
-    const ms = this.q.msaa;
-    this.hdr = d.createTexture({ size: [w, h], format: HDR, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
-    this.hdrMS = ms > 1 ? d.createTexture({ size: [w, h], format: HDR, sampleCount: ms, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
-    this.depth = d.createTexture({ size: [w, h], format: DEPTH, sampleCount: ms, usage: GPUTextureUsage.RENDER_ATTACHMENT });
-    this.postBG = d.createBindGroup({
+    for (const t of [this.hdrMS, this.hdr, this.depth, ...(this.history || [])]) t?.destroy();
+    const taa = this.q.taa;
+    const ms = taa ? 1 : this.q.msaa;
+    const RT = GPUTextureUsage.RENDER_ATTACHMENT, TB = GPUTextureUsage.TEXTURE_BINDING;
+    this.hdr = d.createTexture({ size: [inW, inH], format: HDR, usage: RT | TB });
+    this.hdrMS = ms > 1 ? d.createTexture({ size: [inW, inH], format: HDR, sampleCount: ms, usage: RT }) : null;
+    this.depth = d.createTexture({ size: [inW, inH], format: DEPTH, sampleCount: ms, usage: RT | (taa ? TB : 0) });
+    const postBG = (view) => d.createBindGroup({
       layout: this.postPipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.postUbo } },
-        { binding: 1, resource: this.hdr.createView() },
+        { binding: 1, resource: view },
         { binding: 2, resource: this.linSamp },
       ],
     });
+    if (taa) {
+      this.history = [0, 1].map(() => d.createTexture({ size: [outW, outH], format: HDR, usage: RT | TB }));
+      // taaBG[i] reads history[1 - i] and is drawn into history[i]
+      this.taaBG = [0, 1].map((i) => d.createBindGroup({
+        layout: this.taaPipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.taaUbo } },
+          { binding: 1, resource: this.hdr.createView() },
+          { binding: 2, resource: this.depth.createView() },
+          { binding: 3, resource: this.history[1 - i].createView() },
+          { binding: 4, resource: this.linSamp },
+        ],
+      }));
+      this.postBGs = this.history.map((h) => postBG(h.createView()));
+    } else {
+      this.history = null;
+      this.postBGs = [postBG(this.hdr.createView())];
+    }
+    this.resetHistory = true;
   }
 
   // ---- per frame ------------------------------------------------------------------
@@ -290,7 +334,18 @@ export class Renderer {
     const aspect = this.width / this.height;
     const tanY = Math.tan(cam.fov / 2), tanX = tanY * aspect;
     const view = viewFromBasis(cam.pos, cam.right, cam.up, cam.fwd);
-    const viewProj = mat4mul(cam.proj, view);
+    const cleanViewProj = mat4mul(cam.proj, view);
+    // sub-pixel jitter (Halton 2,3) for temporal upscaling
+    let jx = 0, jy = 0;
+    if (q.taa) {
+      const n = (this.frame % 16) + 1;
+      jx = halton(n, 2) - 0.5; jy = halton(n, 3) - 0.5;
+    }
+    const proj = cam.proj.slice();
+    proj[8] -= (2 * jx) / this.width;
+    proj[9] -= (-2 * jy) / this.height;
+    const viewProj = q.taa ? mat4mul(proj, view) : cleanViewProj;
+    this.frame++;
 
     // shadow box around the camera, snapped to texels to stop shimmering
     const L = env.sunDir;
@@ -331,7 +386,7 @@ export class Renderer {
     u.set([...env.glow, env.stars], 84);
     u.set([...env.moonDir, env.moon], 88);
     d.queue.writeBuffer(this.uniformBuf, 0, u);
-    d.queue.writeBuffer(this.postUbo, 0, new Float32Array([env.exposure, env.fade ?? 1, 0, 0]));
+    d.queue.writeBuffer(this.postUbo, 0, new Float32Array([env.exposure, env.fade ?? 1, q.taa ? q.sharpen ?? 0.25 : 0, 0]));
 
     const planes = frustumPlanes(viewProj);
     const camXZ = [cam.pos[0], cam.pos[2]];
@@ -359,14 +414,14 @@ export class Renderer {
 
     // --- main pass
     {
-      const ms = q.msaa > 1;
+      const ms = !q.taa && q.msaa > 1;
       const pass = enc.beginRenderPass({
         colorAttachments: [{
           view: ms ? this.hdrMS.createView() : this.hdr.createView(),
           resolveTarget: ms ? this.hdr.createView() : undefined,
           clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: ms ? 'discard' : 'store',
         }],
-        depthStencilAttachment: { view: this.depth.createView(), depthClearValue: 0, depthLoadOp: 'clear', depthStoreOp: 'discard' },
+        depthStencilAttachment: { view: this.depth.createView(), depthClearValue: 0, depthLoadOp: 'clear', depthStoreOp: q.taa ? 'store' : 'discard' },
       });
       pass.setBindGroup(0, this.bindMain);
 
@@ -439,13 +494,36 @@ export class Renderer {
       pass.end();
     }
 
+    // --- temporal upscaling into the full-resolution history
+    let postBG = this.postBGs[0];
+    if (q.taa) {
+      const i = this.histIndex;
+      const t = new Float32Array(40);
+      t.set(mat4invert(cleanViewProj), 0);
+      t.set(this.prevViewProj && !this.resetHistory ? this.prevViewProj : cleanViewProj, 16);
+      t.set([jx, jy, this.resetHistory ? 1 : 0, 0], 32);
+      t.set([this.width, this.height, this.outW, this.outH], 36);
+      d.queue.writeBuffer(this.taaUbo, 0, t);
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{ view: this.history[i].createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+      });
+      pass.setPipeline(this.taaPipe);
+      pass.setBindGroup(0, this.taaBG[i]);
+      pass.draw(3);
+      pass.end();
+      postBG = this.postBGs[i];
+      this.histIndex = 1 - i;
+    }
+    this.prevViewProj = cleanViewProj;
+    this.resetHistory = false;
+
     // --- tonemap to the canvas
     {
       const pass = enc.beginRenderPass({
         colorAttachments: [{ view: this.ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
       });
       pass.setPipeline(this.postPipe);
-      pass.setBindGroup(0, this.postBG);
+      pass.setBindGroup(0, postBG);
       pass.draw(3);
       pass.end();
     }
