@@ -384,7 +384,7 @@ export function mosque(b, x, y, z, rot, rng) {
 }
 
 // Dry-stone wall between two points, following the ground.
-export function stoneWall(b, terrain, ax, az, bx, bz, rng, height = 1.2) {
+export function stoneWall(b, terrain, ax, az, bx, bz, rng, height = 1.2, thick = 0.7) {
   const len = Math.hypot(bx - ax, bz - az);
   const n = Math.max(1, Math.ceil(len / 3));
   const rot = Math.atan2(bx - ax, bz - az);
@@ -394,7 +394,7 @@ export function stoneWall(b, terrain, ax, az, bx, bz, rng, height = 1.2) {
     const x = lerp(ax, bx, t), z = lerp(az, bz, t);
     const y = terrain.sample(x, z);
     b.at(x, y, z, rot);
-    b.box(0, -1.2, 0, 0.7, 1.2 + height * (0.8 + rng() * 0.3), len / n + 0.05, col, MAT.STONE);
+    b.box(0, -1.2, 0, thick, 1.2 + height * (0.8 + rng() * 0.3), len / n + 0.05, col, MAT.STONE);
   }
 }
 

@@ -481,6 +481,46 @@ fn stars(d: vec3f) -> vec3f {
   return tint * smoothstep(0.16, 0.0, dist) * (0.03 + 0.4 * b) * tw * u.glow.w * smoothstep(0.0, 0.25, d.y);
 }
 
+// Falling stars: a few independent slots, each with a random chance of a
+// meteor in every short period. A meteor streaks a little way across the sky
+// and burns out; its trail fades behind the bright head.
+fn meteors(d: vec3f) -> vec3f {
+  let night = smoothstep(0.3, 0.8, u.glow.w) * (1.0 - u.weather.x) * (1.0 - u.weather.y);
+  if (night <= 0.01 || d.y < -0.02) { return vec3f(0.0); }
+  var c = vec3f(0.0);
+  for (var i = 0; i < 3; i++) {
+    let per = 5.0 + f32(i) * 2.3;
+    let tt = u.camPos.w + f32(i) * 3.1;
+    let n = i32(floor(tt / per));
+    let h0 = hashI(vec2i(n, i * 131 + 7));
+    if (h0 > 0.45) { continue; }
+    let h1 = hashI(vec2i(n, i * 131 + 19));
+    let h2 = hashI(vec2i(n, i * 131 + 23));
+    let h3 = hashI(vec2i(n, i * 131 + 41));
+    let dur = 0.5 + 0.7 * h1;
+    let p = (tt - f32(n) * per - h2 * (per - dur)) / dur;
+    if (p < 0.0 || p > 1.0) { continue; }
+    let az = h3 * 6.2832;
+    let el = 0.3 + 0.8 * fract(h2 * 7.31);
+    let s0 = vec3f(cos(el) * sin(az), sin(el), -cos(el) * cos(az));
+    let hd = az + 1.2 + 3.9 * fract(h3 * 13.7);
+    var v = vec3f(sin(hd), -0.5 - 0.7 * fract(h1 * 5.13), -cos(hd));
+    v = normalize(v - dot(v, s0) * s0);
+    let arcL = 0.14 + 0.24 * fract(h0 * 17.3);
+    let pe = 1.0 - (1.0 - p) * (1.0 - p);
+    let tip = normalize(s0 + v * arcL * pe);
+    let tl = normalize(s0 + v * arcL * max(pe - 0.4, 0.0));
+    let ab = tip - tl;
+    let s = clamp(dot(d - tl, ab) / max(dot(ab, ab), 1e-9), 0.0, 1.0);
+    let dist = length(d - (tl + ab * s));
+    let w = 0.0008 + 0.0008 * s;
+    let streak = smoothstep(w, 0.0, dist) + 0.06 * smoothstep(w * 3.0, 0.0, dist);
+    let fadeE = smoothstep(0.0, 0.12, p) * smoothstep(1.0, 0.55, p);
+    c += mix(vec3f(0.75, 0.85, 1.0), vec3f(1.0, 0.95, 0.85), h1) * streak * s * s * fadeE * (1.6 + 2.0 * fract(h3 * 3.71));
+  }
+  return c * night * smoothstep(-0.02, 0.12, d.y);
+}
+
 // The moon: a large, bright disk with maria and a darkened limb.
 fn moonDisk(d: vec3f) -> vec4f {
   if (u.moon.w <= 0.0) { return vec4f(0.0); }
@@ -504,7 +544,7 @@ fn moonDisk(d: vec3f) -> vec4f {
 @fragment fn fs(in: SOut) -> @location(0) vec4f {
   let d = normalize(u.camFwd.xyz + in.ndc.x * u.camRight.w * u.camRight.xyz + in.ndc.y * u.camUp.w * u.camUp.xyz);
   var c = skyColor(d, true);
-  c += stars(d);
+  c += stars(d) + meteors(d);
   let mo = moonDisk(d);
   c = mix(c, mo.rgb, mo.a);
   let cl = clouds(u.camPos.xyz, d);

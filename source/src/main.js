@@ -133,7 +133,7 @@ async function main() {
     if (e.code === 'KeyM') { setSound(!settings.sound); return; }
     if (e.code === 'KeyH') { $('stats').hidden = !$('stats').hidden; return; }
     if (e.code === 'KeyT') { if (tour.on) stopTour(); else startTour(); return; }
-    if (/^Digit[1-6]$/.test(e.code)) { stopTour(); flyTo(+e.code.slice(5) - 1); return; }
+    if (/^Digit[1-8]$/.test(e.code)) { stopTour(); flyTo(+e.code.slice(5) - 1); return; }
     if (/^(Key[WASDQEC]|Arrow|Space|Shift)/.test(e.code)) stopTour();
     keys.add(e.code);
   });

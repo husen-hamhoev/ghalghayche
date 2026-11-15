@@ -22,6 +22,8 @@ Download `index.html` and open it in a browser with WebGPU: a recent Chrome or E
 - Warm firelight in the windows of Erzi after dark
 - Dry-stone walls, terraced fields, footpaths and the road along the river
 - A tributary canyon with towers raised on rock pillars
+- **Kyazi**: a small castle of six residential towers strung along a ridge crest, mostly in ruins, joined by a defensive wall that closes a courtyard, with two crypts nearby
+- **Koazoy-Loam**, the mountain of the Koazoy family: a ridge of the Rocky Range across the valley from Kyazi, breaking off in a sheer limestone wall with a ledge and scree below, its jagged crest a little higher than the Table Mountain
 - Pine and birch woods, scree and cliffs and boulders
 - Animals: sheep and horses grazing with shepherd dogs, East Caucasian tur on the cliffs, a wolf pack trotting the high meadows, eagles circling over the villages and bearded vultures soaring along the ridges
 - **Animals** setting (Few, Normal, Many, Lots): Lots has about four times as many: more flocks with their dogs, horse herds, tur groups, wolf packs, eagles, vultures and bats
@@ -30,7 +32,7 @@ Download `index.html` and open it in a browser with WebGPU: a recent Chrome or E
 - **Seasons**: spring, summer, autumn (golden birches, straw-coloured meadows) and winter (snow down to the river, bare trees, a frozen lake)
 - **Weather**: clear, rain, or changing, where clouds gather on the peaks, it rains (snows in winter) and clears again, with lightning and thunder in heavy rain and a rainbow when the sun comes out behind you
 - A compact 4 km world: every village is a short flight away
-- Evening by default: blue twilight, a warm afterglow in the west, stars, and a large moon rising over the ridges. Dawn, morning, midday and golden hour are in the menu
+- Evening by default: blue twilight, a warm afterglow in the west, stars, falling stars streaking across the sky now and then, and a large moon rising over the ridges. Dawn, morning, midday and golden hour are in the menu
 - **Day & night**: an automatic cycle (16 minutes per day, slower around sunrise and sunset). The sun sets, stars and the moon come out, fires are lit, and dawn returns, with mountain shadows following the sun and moon
 
 ## Languages
@@ -47,10 +49,12 @@ English and Russian. A device set to Russian starts in Russian, others in Englis
 | 4 | Targim | Stone crypts with stepped roofs |
 | 5 | Dzheyrakh Gorge | The gorge and the snows of the main ridge |
 | 6 | Myat-Loam | The Table Mountain, high above the gorge |
+| 7 | Kyazi | Six residential towers on a ridge crest, joined by a defensive wall |
+| 8 | Koazoy-Loam | From its summit, over the sheer wall to Kyazi and the gorge |
 
 Each place has a **checkpoint floating in the sky** above it. Click or tap one to fly there; when a ridge hides the place, its checkpoint dims. With the mouse captured, aim at a checkpoint and click.
 
-Press **T** (or **Tour** on a phone) for a guided tour: a slow flight through all six places with a pause at each. Any key or touch takes back control.
+Press **T** (or **Tour** on a phone) for a guided tour: a slow flight through all eight places with a pause at each. Any key or touch takes back control.
 
 The places are inspired by real sites, but the geography is invented and compressed into a 4 km square.
 
@@ -62,7 +66,7 @@ The places are inspired by real sites, but the geography is invented and compres
 | Fly | W A S D or arrow keys |
 | Up / down | E / Q |
 | Faster | Hold Shift |
-| Viewpoints | 1–6 |
+| Viewpoints | 1–8 |
 | Guided tour | T |
 | Menu | Esc |
 | Sound | M |
@@ -82,7 +86,7 @@ URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|mornin
 
 - **Terrain**: a 1025 × 1025 heightfield (4 m spacing), built on the CPU from ridged and fractal simplex noise. It is designed in a larger space and scaled down (relief included) so the world stays compact with natural slopes. The river valleys are carved by blending that relief down toward each river bed with V- and U-shaped profiles. The Table Mountain is a plateau with a cliff band. Village sites are levelled and terraced afterwards. It is drawn as 256 tiles with three levels of detail, plus a far ring of mountains shaped in the vertex shader.
 - **Lighting**: one key light casts the shadows: the sun by day, the moon in the evening. A compute shader marches the heightfield toward it to get soft mountain shadows, the height at which the sun becomes visible above each point (so tower tops catch the last light), and ambient occlusion. A shadow map around the camera adds shadows from towers, trees and rocks.
-- **Sky and air**: an analytic sky with afterglow, stars and a moon with maria and a halo, drifting clouds, a silhouette of the distant main range, height fog with an integral, and a thin valley mist.
+- **Sky and air**: an analytic sky with afterglow, stars, falling stars and a moon with maria and a halo, drifting clouds, a silhouette of the distant main range, height fog with an integral, and a thin valley mist.
 - **Temporal upscaling**: the scene renders at 60–75% resolution with a different sub-pixel jitter each frame. A resolve pass reprojects last frame's full-resolution image using depth and the previous camera, blends in the new samples by how close each landed to the output pixel, and clamps the history to the current neighbourhood so moving things don't ghost. A light sharpen follows. This replaces MSAA and gives a sharp, anti-aliased image at a fraction of the cost, especially on high-density phone screens. `?taa=0` switches back to MSAA.
 - **Lake reflection**: when the lake is near and in view, the terrain, distant mountains, towers and sky are drawn a second time, mirrored in the water plane, at half resolution, and the lake shows that image with ripples. Geometry below the water is clipped by a pipeline constant, so the normal pipelines carry no discard.
 - **Grass**: tufts are generated in the vertex shader on a grid that follows the camera, so no instance buffer is needed.
@@ -101,7 +105,7 @@ pnpm dev              # rebuild on every change
 | File | What it holds |
 |---|---|
 | `source/src/world.js` | Where villages, towers and crypts stand; tree, rock, flock and eagle scattering; viewpoints. **Start here.** |
-| `source/src/terrain.js` | Rivers, the heightfield, the Table Mountain, forest cover |
+| `source/src/terrain.js` | Rivers, the heightfield, the Table Mountain, Koazoy-Loam, forest cover |
 | `source/src/meshes.js` | Tower, crypt, tree, rock, sheep and eagle geometry |
 | `source/src/shaders.js` | All WGSL: terrain, sky, objects, grass, water, lighting compute, tonemap |
 | `source/src/env.js` | Times of day: sun and moon positions, colours |

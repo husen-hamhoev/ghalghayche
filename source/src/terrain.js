@@ -222,6 +222,44 @@ export class Terrain {
     return shore;
   }
 
+  // A ridge of the Rocky Range: a long crest that breaks off in a sheer wall on
+  // its front side (toward -c), with scree at the wall's foot, and falls more
+  // gently behind. dir is the crest's direction (radians from +x toward +z).
+  raiseMassif({ x: cx, z: cz, dir, len, top, front, back, base }) {
+    const ax = Math.cos(dir), az = Math.sin(dir); // along the crest
+    const bx = -az, bz = ax; // across, +c is the back
+    this.#forDisc(cx, cz, len + back + 40, (k, d) => {
+      const i = k % N, j = (k - i) / N;
+      const px = MIN + i * CELL - cx, pz = MIN + j * CELL - cz;
+      const a = px * ax + pz * az, c = px * bx + pz * bz;
+      const ua = Math.abs(a) / len;
+      if (ua >= 1) return;
+      // the crest wanders a little and its height comes in teeth and towers
+      const c0 = 26 * Math.sin(a * 0.009 + 0.7) + 12 * Math.sin(a * 0.027);
+      const teeth = ridged(this.nF, a / 150 + 3.1, 1.7, 2) * (0.35 + 0.65 * (fbm(this.nF, a / 260 + 7.7, 2.9, 2) * 0.5 + 0.5)) + ridged(this.nF, a / 61 + 9.2, 4.1, 1) * 0.25;
+      const crest = top * (1 - 0.35 * ua * ua) * (0.9 + 0.12 * fbm(this.nF, a / 400 + 5.3, 0.4, 2)) * (1 - smoothstep(0.5, 1, ua));
+      const dc = c - c0;
+      // toward the ends the wall leans back and the ridge runs out in slopes
+      const fr = front * (1 + 2.5 * smoothstep(0.45, 1, ua));
+      let f;
+      if (dc < 0) {
+        // the wall: an upper cliff, a ledge, a lower cliff, then the scree apron
+        const w = -dc / fr;
+        const wall = 1 - smoothstep(0, 0.5, w) * 0.42 - smoothstep(0.62, 1.15, w) * 0.4 - smoothstep(1.1, 2.6, w) * 0.18;
+        const scree = 0.3 * (1 - smoothstep(0.9, 3.2, w));
+        f = Math.max(wall, scree);
+      } else {
+        const w = dc / back;
+        f = 1 - Math.pow(smoothstep(0, 1, w), 0.7);
+      }
+      // rough rock on the faces
+      const rough = fbm(this.nF, (MIN + i * CELL) / 45 + 11, (MIN + j * CELL) / 45, 3) * 18 * f;
+      // a few broad summits and notches along the very top
+      const y = base + crest * f + top * 0.1 * teeth * f * f * f * f + rough;
+      if (y > this.h[k]) this.h[k] = y;
+    });
+  }
+
   // Agricultural terraces: quantise height into steps on moderate slopes.
   terrace(cx, cz, R, step) {
     this.#forDisc(cx, cz, R, (k, d) => {

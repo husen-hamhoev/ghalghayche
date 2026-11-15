@@ -221,6 +221,67 @@ export function planWorld(t, seed = 7) {
     }
   }
 
+  // Kyazi: a small castle of residential towers on a ridge crest east of the
+  // gorge, joined by a defensive wall. Across a valley from it rises
+  // Koazoy-Loam, a ridge of the Rocky Range that breaks off in sheer walls.
+  // (Own random stream, so nothing placed before it moves.)
+  const krng = mulberry32(seed + 41);
+  const crestAt = (x, z, r) => {
+    // best crest direction and how well the ground falls away on both sides
+    let best = { s: -1e9 };
+    const h = t.sample(x, z);
+    for (let k = 0; k < 8; k++) {
+      const a = (k / 8) * Math.PI, ax = Math.cos(a), az = Math.sin(a);
+      const along = h - (t.sample(x + ax * r, z + az * r) + t.sample(x - ax * r, z - az * r)) / 2;
+      const across = h - (t.sample(x - az * r, z + ax * r) + t.sample(x + az * r, z - ax * r)) / 2;
+      const s = across - Math.abs(along) * 1.5;
+      if (s > best.s) best = { s, dir: a, across, along };
+    }
+    return best;
+  };
+  let kyazi = null;
+  for (let i = 0; i < 900; i++) {
+    const a = krng() * Math.PI * 2, r = Math.sqrt(krng()) * 260;
+    const x = 900 + Math.cos(a) * r, z = -1060 + Math.sin(a) * r;
+    if (Math.min(distMain(x, z), distTrib(x, z)) < 250) continue;
+    const c = crestAt(x, z, 30);
+    const s = c.s + crestAt(x, z, 60).s * 0.5 - t.roughness(x, z, 10) * 0.3;
+    if (!kyazi || s > kyazi.s) kyazi = { name: 'Kyazi', x, z, h: t.sample(x, z), s, dir: c.dir };
+  }
+  // the massif: its wall faces Kyazi
+  const koazoy = (() => {
+    const px = Math.min(1520, kyazi.x + 600), pz = kyazi.z - 120;
+    const bx = px - kyazi.x, bz = pz - kyazi.z, l = Math.hypot(bx, bz);
+    const base = t.sample(px, pz);
+    const m = { name: 'Koazoy-Loam', x: px, z: pz, dir: Math.atan2(-bx / l, bz / l), len: 620, top: 2010 - base, front: 165, back: 380, base };
+    t.raiseMassif(m);
+    m.h = t.sample(px, pz);
+    m.face = [-bx / l, -bz / l]; // from the wall toward Kyazi
+    return m;
+  })();
+  {
+    // six towers strung along the crest, each nudged onto its highest point
+    const ax = Math.cos(kyazi.dir), az = Math.sin(kyazi.dir);
+    kyazi.towers = [];
+    for (let k = 0; k < 6; k++) {
+      const o = (k - 2.5) * 17;
+      let bx = kyazi.x + ax * o, bz = kyazi.z + az * o, by = -1e9;
+      for (let s = -9; s <= 9; s += 1.5) {
+        const x = kyazi.x + ax * o - az * s, z = kyazi.z + az * o + ax * s, y = t.sample(x, z);
+        if (y > by) { by = y; bx = x; bz = z; }
+      }
+      kyazi.towers.push({ x: bx, z: bz, ruined: k !== 1 && k !== 4, high: k === 1 });
+    }
+    for (const s of kyazi.towers) t.flatten(s.x, s.z, 5.5, 5, t.sample(s.x, s.z), 0.85);
+    // the gentler flank holds the courtyard wall and, past the end, two crypts
+    const side = t.sample(kyazi.x - az * 25, kyazi.z + ax * 25) > t.sample(kyazi.x + az * 25, kyazi.z - ax * 25) ? 1 : -1;
+    kyazi.side = [-az * side, ax * side];
+    const end = kyazi.towers[5];
+    kyazi.crypts = [0, 1].map((k) => ({ x: end.x + ax * (24 + k * 9) + kyazi.side[0] * (6 + k * 3), z: end.z + az * (24 + k * 9) + kyazi.side[1] * (6 + k * 3) }));
+    for (const c of kyazi.crypts) t.flatten(c.x, c.z, 3.2, 4, t.sample(c.x, c.z), 0.8);
+    taken.push({ x: kyazi.x, z: kyazi.z, r: 75 });
+  }
+
   // ---- roads and paths --------------------------------------------------------
   const road = [];
   for (let z = MIN; z <= -MIN; z += 30) {
@@ -244,6 +305,7 @@ export function planWorld(t, seed = 7) {
   };
   [erzi, egikal, targim].forEach((v) => pathTo(v));
   pathTo(fold, 3);
+  pathTo(kyazi, 3);
   // the path over the bridge and up the far bank
   {
     const [ax, az] = bridge.across, h = bridge.span / 2 + 4;
@@ -251,7 +313,7 @@ export function planWorld(t, seed = 7) {
   }
 
   const sites = [erzi, egikal, targim];
-  return { villages: [erzi, egikal, targim, vov], watch, sites, paths, taken, vov, table, erzi, egikal, targim, fold, bridge, mills, waterfall, lake, glacier, melt };
+  return { villages: [erzi, egikal, targim, vov], watch, sites, paths, taken, vov, table, erzi, egikal, targim, fold, bridge, mills, waterfall, lake, glacier, melt, kyazi, koazoy };
 }
 
 // Search the gorge walls for a long, steep drop and follow it downhill.
@@ -424,6 +486,31 @@ export function buildStructures(t, plan, surf, seed = 11) {
   const rim = { x: v.x + across[0] * 70, z: v.z + across[1] * 70 };
   residentialTower(b, rim.x, t.sample(rim.x, rim.z), rim.z, facing(rim.x, rim.z, v.x, v.z), rng, {});
   v.pillars = pillars;
+
+  // Kyazi: six residential towers on the crest, mostly ruined, joined by a
+  // defensive wall that runs from tower to tower and closes a courtyard on
+  // the gentler flank; two crypts beyond the last tower
+  {
+    const k = plan.kyazi, kr = mulberry32(seed + 41);
+    const ax = Math.cos(k.dir), az = Math.sin(k.dir), along = Math.atan2(ax, az);
+    const wall = (x0, z0, x1, z1) => {
+      const n = Math.max(1, Math.round(Math.hypot(x1 - x0, z1 - z0) / 5));
+      for (let i = 0; i < n; i++) {
+        const broken = kr() < 0.3;
+        stoneWall(b, t, lerp(x0, x1, i / n), lerp(z0, z1, i / n), lerp(x0, x1, (i + 1) / n), lerp(z0, z1, (i + 1) / n), kr, broken ? 0.8 + kr() : 2.6 + kr() * 1.2, 1.1);
+      }
+    };
+    k.towers.forEach((s, i) => {
+      residentialTower(b, s.x, t.sample(s.x, s.z), s.z, along + (kr() - 0.5) * 0.2, kr, { ruined: s.ruined, height: s.high ? 15 : 12 + kr() * 2, w: 7.5 + kr() * 1.5, d: 7 + kr() * 1.5 });
+      if (i) wall(k.towers[i - 1].x, k.towers[i - 1].z, s.x, s.z);
+    });
+    const [sx, sz] = k.side, f = k.towers[0], l = k.towers[5];
+    const ca = [f.x + sx * 16, f.z + sz * 16], cb = [l.x + sx * 16, l.z + sz * 16];
+    wall(f.x, f.z, ca[0], ca[1]);
+    wall(ca[0], ca[1], cb[0], cb[1]);
+    wall(cb[0], cb[1], l.x, l.z);
+    for (const c of k.crypts) crypt(b, c.x, t.sample(c.x, c.z), c.z, along + (kr() - 0.5) * 0.4, kr, {});
+  }
 
   // dry-stone walls around fields and between houses
   for (const vil of [plan.erzi, plan.egikal, plan.targim]) {
@@ -803,8 +890,34 @@ export function makeViewpoints(t, plan) {
     const tz = S(900), tx = RIVER.x(tz);
     vps.push(look('Myat-Loam', 'The Table Mountain, high above the gorge', from, [tx, RIVER.bed(tz) + V(700), tz]));
   }
+  // 7: Kyazi, from the side of the gorge, with the wall of Koazoy-Loam
+  // rising behind its towers
+  const { kyazi, koazoy } = plan;
+  {
+    const [fx, fz] = koazoy.face; // from the wall toward Kyazi
+    const x = kyazi.x + fx * 140 - fz * 25, z = kyazi.z + fz * 140 + fx * 25;
+    const from = [x, Math.max(t.sample(x, z) + 12, kyazi.h + 48), z];
+    vps.push(look('Kyazi', 'Six residential towers on a ridge crest, joined by a defensive wall', from, [kyazi.x - fx * 300, kyazi.h + 62, kyazi.z - fz * 300]));
+  }
+  // 8: Koazoy-Loam, from just off its summit, over the wall toward Kyazi
+  // and the gorge
+  {
+    const [fx, fz] = koazoy.face;
+    const ax = Math.cos(koazoy.dir), az = Math.sin(koazoy.dir);
+    let top = null;
+    for (let a = -400; a <= 400; a += 8) {
+      for (let c = -60; c <= 60; c += 8) {
+        const x = koazoy.x + ax * a - fx * c, z = koazoy.z + az * a - fz * c, y = t.sample(x, z);
+        if (!top || y > top.y) top = { x, z, y };
+      }
+    }
+    koazoy.summit = top;
+    const x = top.x + fx * 60, z = top.z + fz * 60;
+    const from = [x, top.y + 22, z];
+    vps.push(look('Koazoy-Loam', 'The mountain of the Koazoy family and its sheer rock walls', from, [kyazi.x + fx * 500, kyazi.h - 40, kyazi.z + fz * 500]));
+  }
   // stable ids (names and descriptions come from the translations)
-  ['erzi', 'egikal', 'vovnushki', 'targim', 'gorge', 'myatloam'].forEach((id, i) => { vps[i].id = id; });
+  ['erzi', 'egikal', 'vovnushki', 'targim', 'gorge', 'myatloam', 'kyazi', 'koazoy'].forEach((id, i) => { vps[i].id = id; });
 
   // where each checkpoint floats in the sky: above the place itself
   const anchors = [
@@ -814,6 +927,8 @@ export function makeViewpoints(t, plan) {
     [targim.cryptCentre.x, t.sample(targim.cryptCentre.x, targim.cryptCentre.z) + 60, targim.cryptCentre.z],
     [vps[4].pos[0], vps[4].pos[1] + 25, vps[4].pos[2]],
     [TABLE.x, t.sample(TABLE.x, TABLE.z) + 70, TABLE.z],
+    [kyazi.x, kyazi.h + 60, kyazi.z],
+    [koazoy.summit.x, koazoy.summit.y + 70, koazoy.summit.z],
   ];
   vps.forEach((vp, i) => { vp.anchor = anchors[i]; });
 
