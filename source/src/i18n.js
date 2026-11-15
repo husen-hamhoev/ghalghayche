@@ -81,7 +81,7 @@ const STRINGS = {
     'place.kyazi': 'Kyazi',
     'place.kyazi.sub': 'Six residential towers on a ridge crest, joined by a defensive wall into one castle',
     'place.koazoy': 'Koazoy-Loam',
-    'place.koazoy.sub': 'The mountain of the Koazoy family: from its summit, over the sheer wall to Kyazi and the gorge',
+    'place.koazoy.sub': 'From its summit, over the sheer wall to Kyazi and the gorge',
   },
   ru: {
     'doc.title': 'ГӀалгӀайче',
