@@ -540,7 +540,6 @@ async function main() {
   let frames = 0, fpsT = 0, fps = 0;
   // Avalanches: now and then one of the tracks that is under snow this
   // season, and in view, lets go. Its rumble arrives as late as sound would.
-  if (params.has('milkyway')) renderer.milkyWay = true;
   const av = { next: params.has('avalanche') ? 2.5 : 20 + Math.random() * 30, cur: null };
   const inSight = (x, z) => {
     const y = terrain.sample(x, z) + 18;

@@ -23,7 +23,7 @@ struct U {
   season: vec4f,    // autumn, winter, spring (0..1 each; all 0 = summer), unused
   weather: vec4f,   // rain, cloud on the peaks, lightning flash, rainbow
   extra: vec4f,     // clip height, clip on (reflection pass), lightning azimuth, lake reflection ready
-  extra2: vec4f,    // unused, Milky Way (preview), unused, unused
+  extra2: vec4f,    // unused
   aval: vec4f,      // avalanche track: start x, z, end x, z
   aval2: vec4f,     // avalanche: seconds since release, run time, on, seed
 };
@@ -524,7 +524,7 @@ fn meteors(d: vec3f) -> vec3f {
   return c * night * smoothstep(-0.02, 0.12, d.y);
 }
 
-// The Milky Way (preview only, ?milkyway): an arch from horizon to horizon.
+// The Milky Way: an arch from horizon to horizon.
 // Its bright, warm core sits low in the south; along it lie lumpy star
 // clouds, a dark rift of dust that splits the band near the core, finer dust
 // lanes, a few faint pink nebulae and a grain of countless faint stars.
@@ -538,7 +538,7 @@ fn mwGrain(g: vec2f, salt: i32, density: f32) -> vec4f {
   return vec4f(tint * b, b);
 }
 fn milkyWay(d: vec3f) -> vec3f {
-  if (u.extra2.y <= 0.0 || u.glow.w <= 0.0 || d.y < -0.05) { return vec3f(0.0); }
+  if (u.glow.w <= 0.0 || d.y < -0.05) { return vec3f(0.0); }
   let C = normalize(vec3f(-0.45, 0.28, 0.85)); // the galactic centre, low in the south
   let G = normalize(cross(C, normalize(vec3f(0.55, 0.8, -0.25)))); // pole of the band
   let E = cross(G, C);
