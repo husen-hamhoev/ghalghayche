@@ -23,7 +23,7 @@ struct U {
   season: vec4f,    // autumn, winter, spring (0..1 each; all 0 = summer), unused
   weather: vec4f,   // rain, cloud on the peaks, lightning flash, rainbow
   extra: vec4f,     // clip height, clip on (reflection pass), lightning azimuth, lake reflection ready
-  extra2: vec4f,    // unused
+  extra2: vec4f,    // moon phase angle (0 full, pi new), moon lit fraction, +1 waxing / -1 waning, unused
   aval: vec4f,      // avalanche track: start x, z, end x, z
   aval2: vec4f,     // avalanche: seconds since release, run time, on, seed
 };
@@ -115,7 +115,8 @@ fn skyColor(d: vec3f, sunDisk: bool) -> vec3f {
   if (sunDisk && sun.y > -0.02) { c += u.glow.rgb * smoothstep(0.99965, 0.9999, sd) * 60.0; }
   // soft halo around the moon
   let md = max(dot(d, u.moon.xyz), 0.0);
-  c += vec3f(0.55, 0.62, 0.8) * u.moon.w * (pow(md, 1500.0) * 0.25 + pow(md, 120.0) * 0.08 + pow(md, 12.0) * 0.02);
+  // (a thin moon lights up far less of the sky around it)
+  c += vec3f(0.55, 0.62, 0.8) * u.moon.w * (0.1 + 0.9 * u.extra2.y) * (pow(md, 1500.0) * 0.25 + pow(md, 120.0) * 0.08 + pow(md, 12.0) * 0.02);
   return c;
 }
 
@@ -572,10 +573,12 @@ fn milkyWay(d: vec3f) -> vec3f {
   let s1 = mwGrain(vec2f(lon, lat) * 430.0, 0, dens);
   let s2 = mwGrain(vec2f(lon, lat) * 210.0, 7, dens * 0.25);
   col += s1.rgb * 0.1 + s2.rgb * 0.22;
-  return col * u.glow.w * (1.0 - 0.45 * u.moon.w) * smoothstep(-0.05, 0.22, d.y);
+  return col * u.glow.w * (1.0 - 0.45 * u.moon.w * u.extra2.y) * smoothstep(-0.05, 0.22, d.y);
 }
 
-// The moon: a large, bright disk with maria and a darkened limb.
+// The moon: a large, bright disk with maria and a darkened limb, lit to its
+// phase (extra2.x: 0 full, pi new) from the side where the sun is. The unlit
+// part hides the stars behind it but shows only a faint earthshine.
 fn moonDisk(d: vec3f) -> vec4f {
   if (u.moon.w <= 0.0) { return vec4f(0.0); }
   let m = u.moon.xyz;
@@ -591,16 +594,23 @@ fn moonDisk(d: vec3f) -> vec4f {
   alb *= 0.9 + 0.1 * vnoise(q * 18.0);
   let crater = smoothstep(0.75, 0.9, vnoise(q * 7.0 + 11.0)) * 0.12;
   alb -= crater;
-  let col = vec3f(1.0, 0.97, 0.9) * alb * (0.62 + 0.38 * z) * u.moon.w * 0.75;
+  // lit from the lower right while waxing (toward where the sun has set),
+  // from the lower left while waning
+  let side = normalize(vec2f(u.extra2.z, -0.75));
+  let ph = u.extra2.x;
+  let L = vec3f(side * sin(ph), cos(ph));
+  let lit = smoothstep(-0.04, 0.06, dot(vec3f(q, z), L));
+  let shade = lit * (0.62 + 0.38 * z) + 0.006 + 0.018 * (1.0 - u.extra2.y);
+  let col = vec3f(1.0, 0.97, 0.9) * alb * shade * u.moon.w * 0.75;
   return vec4f(col, smoothstep(1.02, 0.98, r));
 }
 
 @fragment fn fs(in: SOut) -> @location(0) vec4f {
   let d = normalize(u.camFwd.xyz + in.ndc.x * u.camRight.w * u.camRight.xyz + in.ndc.y * u.camUp.w * u.camUp.xyz);
-  var c = skyColor(d, true);
-  c += stars(d) + meteors(d) + milkyWay(d);
+  let sky = skyColor(d, true);
+  var c = sky + stars(d) + meteors(d) + milkyWay(d);
   let mo = moonDisk(d);
-  c = mix(c, mo.rgb, mo.a);
+  c = mix(c, sky + mo.rgb, mo.a);
   let cl = clouds(u.camPos.xyz, d);
   c = mix(c, cl.rgb, cl.a);
   // lightning lights up the clouds in one direction
@@ -1490,6 +1500,74 @@ struct POut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1
   }
   a *= in.fade * u.weather.x;
   return vec4f(col * a, a);
+}
+`;
+
+// ---- jackdaws: flocks wheeling around the towers when the sun is low ----------------
+// One instance per bird: its flock's centre above a village, and a seed. Each
+// bird circles a slowly wandering centre on its own loop, faces along its
+// flight and beats its wings; small dark silhouettes against the evening sky.
+export const JACKDAWS = COMMON + /* wgsl */ `
+struct JOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) up: f32 };
+// around sunrise and sunset: from just after the sun sets to while it is low
+fn flockOn() -> f32 {
+  let e = u.skySun.y;
+  return smoothstep(-0.16, -0.03, e) * (1.0 - smoothstep(0.3, 0.5, e)) * (1.0 - u.weather.x);
+}
+fn birdPos(c: vec3f, s: f32, t: f32) -> vec3f {
+  let site = fract(c.x * 0.0131 + c.z * 0.0071);
+  let ct = t * 0.09 + site * 6.283;
+  let centre = c + vec3f(cos(ct) * 32.0, 7.0 * sin(ct * 1.7), sin(ct * 1.3) * 32.0);
+  let h1 = hash11(s * 1.71 + 0.31);
+  let h2 = hash11(s * 2.93 + 0.17);
+  let h3 = hash11(s * 4.07 + 0.59);
+  let h4 = hash11(s * 5.33 + 0.83);
+  let h5 = hash11(s * 6.61 + 0.47);
+  // most of the flock wheels the same way, a few cut across
+  let w = (0.35 + 0.4 * h1) * select(-1.0, 1.0, h2 > 0.2);
+  let a = t * w + h3 * 6.283;
+  let r = 8.0 + 26.0 * h4 + 6.0 * sin(t * 0.37 + h5 * 6.0);
+  let y = 14.0 * (h5 - 0.5) + 5.0 * sin(t * 0.6 + h1 * 9.0);
+  return centre + vec3f(cos(a) * r, y, sin(a) * r);
+}
+@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) bird: vec4f) -> JOut {
+  var o: JOut;
+  o.pos = vec4f(0.0, 0.0, -2.0, 1.0);
+  let on = flockOn();
+  // the flock gathers and thins out bird by bird
+  if (on <= 0.01 || hash11(bird.w * 3.13 + 0.7) > on) { return o; }
+  if (distance(bird.xyz, u.camPos.xyz) > 1400.0) { return o; }
+  let t = u.camPos.w;
+  let p = birdPos(bird.xyz, bird.w, t);
+  let p1 = birdPos(bird.xyz, bird.w, t + 0.08);
+  let p2 = birdPos(bird.xyz, bird.w, t + 0.16);
+  let fwd = normalize(p1 - p + vec3f(1e-4, 0.0, 0.0));
+  // bank into the turn, as wheeling birds do; it also shows their wings
+  let turn = cross(p1 - p, p2 - p1).y;
+  let bank = 0.75 * sign(turn);
+  let flat = normalize(cross(vec3f(0.0, 1.0, 0.0), fwd));
+  let side = normalize(flat * cos(bank) + vec3f(0.0, 1.0, 0.0) * sin(bank));
+  let up = normalize(cross(fwd, side));
+  let flap = sin(t * (8.0 + 4.0 * hash11(bird.w * 7.7)) + bird.w * 31.0);
+  // two swept-back wings in a shallow V (x side, y up, z forward), and a body
+  let tip = 0.25 + flap * 0.55;
+  var shape = array<vec3f, 9>(
+    vec3f(0.0, 0.0, 0.35), vec3f(-1.0, tip, -0.2), vec3f(0.0, 0.0, -0.25),
+    vec3f(0.0, 0.0, 0.35), vec3f(0.0, 0.0, -0.25), vec3f(1.0, tip, -0.2),
+    vec3f(0.0, 0.07, 0.45), vec3f(0.0, -0.1, 0.0), vec3f(0.0, 0.0, -0.55));
+  let k = shape[vi];
+  // true size up close; far off, never smaller than a few pixels
+  let span = max(0.42, distance(p, u.camPos.xyz) * u.camUp.w * 0.01);
+  let wp = p + side * k.x * span + up * k.y * span + fwd * k.z * span * 1.5;
+  o.pos = u.viewProj * vec4f(wp, 1.0);
+  o.wp = wp;
+  o.up = k.y;
+  return o;
+}
+@fragment fn fs(in: JOut) -> @location(0) vec4f {
+  let lit = ambient(vec3f(0.0, 1.0, 0.0)) * 0.6 + u.sunColor.rgb * u.sunDir.w * 0.12;
+  let col = vec3f(0.02, 0.02, 0.025) * lit * (1.0 + 0.3 * in.up);
+  return vec4f(applyFog(col, in.wp), 1.0);
 }
 `;
 

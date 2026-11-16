@@ -29,11 +29,12 @@ Download `index.html` and open it in a browser with WebGPU: a recent Chrome or E
 - **Animals** setting (Few, Normal, Many, Lots): Lots has about four times as many: more flocks with their dogs, horse herds, tur groups, wolf packs, eagles, vultures and bats
 - Mist that drifts through the gorge in banks, heaviest at night and dawn
 - **Avalanches**: now and then, on a slope that is under snow in the current season and in view, an avalanche breaks loose and runs down in a billowing cloud of powder; its deep rumble arrives late when it is far away, as sound would
+- Flocks of jackdaws wheeling high over the tower villages at dawn, golden hour and dusk
 - Fireflies over the meadows on warm nights, bats around the villages after dusk, butterflies by day, alpine flowers, and patches of Caucasian rhododendron with pale yellow blossoms on the high slopes
 - **Seasons**: spring, summer, autumn (golden birches, straw-coloured meadows) and winter (snow down to the river, bare trees, a frozen lake)
 - **Weather**: clear, rain, or changing, where clouds gather on the peaks, it rains (snows in winter) and clears again, with lightning and thunder in heavy rain and a rainbow when the sun comes out behind you
 - A compact 4 km world: every village is a short flight away
-- Evening by default: blue twilight, a warm afterglow in the west, stars and the Milky Way arching over the ridges, falling stars streaking across the sky now and then, and a large moon rising over the ridges. Dawn, morning, midday, golden hour and deep **night** (a dark sky with the Milky Way, the moon high in the east) are in the menu
+- Evening by default: blue twilight, a warm afterglow in the west, stars and the Milky Way arching over the ridges, falling stars streaking across the sky now and then, and a large moon rising over the ridges. The moon's phase follows the real calendar: full some nights, a thin crescent with faint earthshine on others, and gone at new moon, when the nights are darker and the Milky Way shines brightest. Dawn, morning, midday, golden hour and deep **night** (a dark sky with the Milky Way, the moon high in the east) are in the menu
 - **Day & night**: an automatic cycle (16 minutes per day, slower around sunrise and sunset). The sun sets, stars and the moon come out, fires are lit, and dawn returns, with mountain shadows following the sun and moon
 
 ## Languages
@@ -81,7 +82,7 @@ Low, Medium and High change render resolution, shadows, shader detail, grass, tr
 
 **Auto** (the default) adapts in both directions while you fly. Phones and tablets start on Low, desktops on Medium or High. If the frame rate stays low, the scene lowers its resolution, then drops a level. If it runs smoothly at 60 fps for a few seconds, it tries the next level up and keeps it only if it still holds about 60 fps. A level that proved too heavy isn't retried in that session. Picking Low, Medium or High in the menu pins that level instead.
 
-URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|morning|noon|golden|evening|night|cycle` (with `&hour=` for the cycle), `?season=spring|summer|autumn|winter`, `?weather=clear|changing|rain`, `?animals=few|normal|many|lots` set the time of day, `?q=low|medium|high` pin a detail level, `?stats` show stats, `?auto` skip the title screen, `?cam=x,y,z,yawDeg,pitchDeg` place the camera, `?avalanche` set off an avalanche right away.
+URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|morning|noon|golden|evening|night|cycle` (with `&hour=` for the cycle), `?season=spring|summer|autumn|winter`, `?weather=clear|changing|rain`, `?animals=few|normal|many|lots` set the time of day, `?q=low|medium|high` pin a detail level, `?stats` show stats, `?auto` skip the title screen, `?cam=x,y,z,yawDeg,pitchDeg` place the camera, `?avalanche` set off an avalanche right away, `?moon=0..1` set the moon's age (0 new, 0.25 first quarter, 0.5 full).
 
 ## How it works
 

@@ -62,7 +62,22 @@ async function main() {
 
   let quality = PRESETS[settings.quality];
   const renderer = new Renderer(device, context, format);
-  renderer.init({ terrain, structures, scatter: sets, water, lake: plan.lake }, quality);
+  // jackdaw flocks over the tower villages: [centre x, y, z, seed] per bird,
+  // wheeling high, where they show against the sky before going to roost
+  const jackdaws = [];
+  {
+    const pil = plan.vov.pillars;
+    const sites = [
+      [plan.erzi.x, plan.erzi.h + 110, plan.erzi.z, 60],
+      [(pil[0].x + pil[1].x) / 2, pil[0].top + 60, (pil[0].z + pil[1].z) / 2, 45],
+      [plan.egikal.x, plan.egikal.h + 90, plan.egikal.z, 45],
+      [plan.kyazi.x, plan.kyazi.h + 85, plan.kyazi.z, 40],
+      [plan.targim.x, plan.targim.h + 90, plan.targim.z, 35],
+    ];
+    let seed = 1;
+    for (const [x, y, z, n] of sites) for (let i = 0; i < n; i++) jackdaws.push(x, y, z, seed++ * 0.6180339);
+  }
+  renderer.init({ terrain, structures, scatter: sets, water, lake: plan.lake, jackdaws: new Float32Array(jackdaws) }, quality);
   renderer.density = quality.density;
   // clock for the automatic day & night cycle (starts just before sunset)
   let clock = parseFloat(params.get('hour')) || 17.4;
@@ -359,13 +374,26 @@ async function main() {
     return Math.max(0, 1 - f * 6) + (f > 0.15 && f < 0.32 ? 0.6 * (1 - (f - 0.15) / 0.17) : 0);
   };
   const grey = (c, k) => { const l = (c[0] + c[1] + c[2]) / 3; return c.map((v) => lerp(v, l * 0.75, k)); };
+  // The moon's phase follows the calendar: its age in the 29.53-day synodic
+  // month, counted from a known new moon (6 Jan 2000, 18:14 UTC).
+  // ?moon=0..1 sets the age by hand (0 new, 0.25 first quarter, 0.5 full).
+  const SYNODIC = 29.530588853;
+  const moonAge = params.has('moon')
+    ? clamp(parseFloat(params.get('moon')) || 0, 0, 1)
+    : ((((Date.now() - Date.UTC(2000, 0, 6, 18, 14)) / 864e5) / SYNODIC) % 1 + 1) % 1;
+  const moonPhaseAngle = Math.abs(Math.PI - 2 * Math.PI * moonAge); // 0 full, pi new
+  const moonLit = (1 + Math.cos(moonPhaseAngle)) / 2;
   const withWeather = (e, flash) => {
     const c = wx.cloud;
     const season = SEASONS.find((x) => x.id === settings.season).v;
+    // by moonlight, a thin moon gives far less light than a full one
+    const moonKey = e.skySun[1] < -0.02;
+    const ml = moonKey ? lerp(0.22, 1, moonLit) : 1;
     return {
       ...e,
-      sunIntensity: e.sunIntensity * (1 - 0.75 * c),
-      ambient: e.ambient * (1 - 0.2 * c),
+      moonPhase: [moonPhaseAngle, moonLit, moonAge < 0.5 ? 1 : -1],
+      sunIntensity: e.sunIntensity * (1 - 0.75 * c) * ml,
+      ambient: e.ambient * (1 - 0.2 * c) * (moonKey ? lerp(0.85, 1, moonLit) : 1),
       zenith: grey(e.zenith, 0.7 * c),
       horizon: grey(e.horizon, 0.6 * c),
       cloudCover: lerp(e.cloudCover, 0.97, c),

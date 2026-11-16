@@ -154,6 +154,7 @@ export class Renderer {
       tur: this.#mesh(turMesh().mesh), rhodo: this.#mesh(rhodoMesh()),
     };
     this.fx = { buf: this.#buffer(world.structures.fx, GPUBufferUsage.VERTEX), count: world.structures.fxCount };
+    this.jackdaws = world.jackdaws?.length ? { buf: this.#buffer(world.jackdaws, GPUBufferUsage.VERTEX), count: world.jackdaws.length / 4 } : null;
     const sets = world.scatter;
     this.sets = {};
     for (const [k, s] of Object.entries({ ...sets, crags: world.structures.crags })) {
@@ -312,6 +313,17 @@ export class Renderer {
       fragment: { module: am, entryPoint: 'fs', targets: [{ format: HDR, blend: alphaBlend }] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'greater' },
+      multisample: { count: msaa },
+    });
+    const jm = mod(S.JACKDAWS);
+    this.jackdawPipe = d.createRenderPipeline({
+      layout: this.pipeLayout,
+      vertex: { module: jm, entryPoint: 'vs', buffers: [{ arrayStride: 16, stepMode: 'instance', attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x4' },
+      ] }] },
+      fragment: { module: jm, entryPoint: 'fs', targets: [{ format: HDR }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: DEPTH, depthWriteEnabled: true, depthCompare: 'greater' },
       multisample: { count: msaa },
     });
     const bugs = mod(S.BUGS);
@@ -520,7 +532,7 @@ export class Renderer {
     u.set(env.season ?? [0, 0, 0, 0], 92);
     u.set(env.weather ?? [0, 0, 0, 0], 96);
     u.set([0, 0, env.lightningAz ?? 0, 0], 100);
-    u.set([0, 0, 0, 0], 104);
+    u.set([...(env.moonPhase ?? [0, 1, 1]), 0], 104);
     const av = this.aval;
     u.set(av ? [av.sx, av.sz, av.ex, av.ez, av.t, av.run, 1, av.seed] : [0, 0, 0, 0, 0, 0, 0, 0], 108);
 
@@ -708,6 +720,12 @@ export class Renderer {
         pass.setPipeline(this.fxPipe);
         pass.setVertexBuffer(0, this.fx.buf);
         pass.draw(6, this.fx.count);
+      }
+      // jackdaws around the towers at sunrise and sunset
+      if (this.jackdaws && !OFF.has('jackdaws')) {
+        pass.setPipeline(this.jackdawPipe);
+        pass.setVertexBuffer(0, this.jackdaws.buf);
+        pass.draw(9, this.jackdaws.count);
       }
       // an avalanche's powder cloud
       if (this.aval) { pass.setPipeline(this.avalPipe); pass.draw(6, 140); }
