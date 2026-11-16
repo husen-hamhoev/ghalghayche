@@ -896,7 +896,7 @@ export function buildWater(t, surf, waterfall = [], melt = []) {
     return rMax;
   };
   const ribbon = (pts, fit) => {
-    const base = verts.length / 7;
+    const base = verts.length / 6;
     let dist = 0;
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
@@ -911,17 +911,16 @@ export function buildWater(t, surf, waterfall = [], melt = []) {
       // a waterfall hugs the slope under each edge; rivers stay level across
       const yl = fit ? p.y : t.sample(p.x - nx * wl, p.z - nz * wl) + 0.35;
       const yr = fit ? p.y : t.sample(p.x + nx * wr, p.z + nz * wr) + 0.35;
-      // per vertex: position, across (0..1), metres along, flow, metres from the centre line
-      verts.push(p.x - nx * wl, yl, p.z - nz * wl, 0, dist, flow, -wl);
-      verts.push(p.x + nx * wr, yr, p.z + nz * wr, 1, dist, flow, wr);
+      verts.push(p.x - nx * wl, yl, p.z - nz * wl, 0, dist, flow);
+      verts.push(p.x + nx * wr, yr, p.z + nz * wr, 1, dist, flow);
       if (i > 0) { const a = base + (i - 1) * 2; idx.push(a, a + 1, a + 3, a, a + 3, a + 2); }
     }
   };
   const counts = [];
   ribbon(surf.mainZ.map((z, i) => ({ x: RIVER.x(z), z, y: surf.mainY[i], w: RIVER.width(z) * 0.5 + S(8) })), true);
-  counts.push(verts.length / 7);
+  counts.push(verts.length / 6);
   ribbon(surf.tribX.map((x, i) => ({ x, z: TRIB.z(x), y: surf.tribY[i], w: S(12) })), true);
-  counts.push(verts.length / 7);
+  counts.push(verts.length / 6);
   if (waterfall.length > 2) ribbon(waterfall.map((p, i) => ({ x: p.x, z: p.z, y: p.y + 0.3, w: 3.2 + Math.min(i, 40) * 0.07 })), false);
   if (melt.length > 2) ribbon(melt.map((p, i) => ({ x: p.x, z: p.z, y: p.y + 0.2, w: 1.4 + Math.min(i, 60) * 0.02 })), false);
   return { vertices: new Float32Array(verts), indices: new Uint32Array(idx), counts };

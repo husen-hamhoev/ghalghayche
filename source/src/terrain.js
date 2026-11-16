@@ -212,8 +212,7 @@ export class Terrain {
       const r = shore(a);
       if (d < r) {
         const u = d / r;
-        // a broad shelf of shallows, then the deep middle
-        this.h[k] = level - 0.6 - 7.5 * (1 - u * u) * (1 - u * u);
+        this.h[k] = level - 0.6 - 7 * (1 - u * u);
       } else {
         const rim = level + 0.4 + (d - r) * 0.05;
         const w = smoothstep(r + 8, r + 42, d);

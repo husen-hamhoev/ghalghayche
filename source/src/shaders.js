@@ -23,10 +23,9 @@ struct U {
   season: vec4f,    // autumn, winter, spring (0..1 each; all 0 = summer), unused
   weather: vec4f,   // rain, cloud on the peaks, lightning flash, rainbow
   extra: vec4f,     // clip height, clip on (reflection pass), lightning azimuth, lake reflection ready
-  extra2: vec4f,    // the lake: centre x, z, radius, water level
+  extra2: vec4f,    // unused
   aval: vec4f,      // avalanche track: start x, z, end x, z
   aval2: vec4f,     // avalanche: seconds since release, run time, on, seed
-  rings: array<vec4f, 4>, // fish rising on the lake: x, z, start time, leaps (1) or only rings (0)
 };
 @group(0) @binding(0) var<uniform> u: U;
 // Set only for the lake's reflection pass: drop what lies below the water.
@@ -1086,46 +1085,13 @@ struct GOut {
 
 // ---- rivers ----------------------------------------------------------------------
 export const WATER = COMMON + /* wgsl */ `
-struct WIn { @location(0) pos: vec3f, @location(1) uv: vec2f, @location(2) flow: f32, @location(3) across: f32 };
-struct WOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) uv: vec2f, @location(2) flow: f32, @location(3) across: f32 };
+struct WIn { @location(0) pos: vec3f, @location(1) uv: vec2f, @location(2) flow: f32 };
+struct WOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) uv: vec2f, @location(2) flow: f32 };
 @vertex fn vs(v: WIn) -> WOut {
   var o: WOut;
   o.pos = u.viewProj * vec4f(v.pos, 1.0);
-  o.wp = v.pos; o.uv = v.uv; o.flow = v.flow; o.across = v.across;
+  o.wp = v.pos; o.uv = v.uv; o.flow = v.flow;
   return o;
-}
-// Trout holding station in the calmer reaches, noses into the current: one
-// may lie in each 11 m of river. They drift a little, sway their tails and
-// now and then dart forward and drop back. along/across are in metres; the
-// river rises (upstream) toward +along.
-fn riverFish(along: f32, across: f32) -> f32 {
-  let t = u.camPos.w;
-  let cellL = 6.0;
-  let ci = floor(along / cellL);
-  var dark = 0.0;
-  for (var k = -1; k <= 1; k++) {
-    let c = ci + f32(k);
-    let h = hash11(c * 1.37 + 0.13);
-    if (h > 0.6) { continue; }
-    let h2 = hash11(c * 2.71 + 0.71);
-    let h3 = hash11(c * 4.13 + 0.37);
-    let ph = fract(t * 0.045 + h3);
-    let dart = smoothstep(0.0, 0.06, ph) * (1.0 - smoothstep(0.1, 0.5, ph)) * 2.5;
-    let fa = c * cellL + cellL * 0.5 + 1.2 * sin(t * 0.19 + h * 20.0) + dart;
-    let fc = (h2 - 0.5) * 5.0 + 0.5 * sin(t * 0.31 + h2 * 13.0);
-    let len = 0.55 + 0.3 * h3;
-    let s = (along - fa) / len; // -0.5 tail .. +0.5 nose
-    if (abs(s) > 0.75) { continue; }
-    let sway = sin(t * (6.0 + 3.0 * dart) + h * 30.0) * 0.07 * len * smoothstep(0.2, -0.6, s);
-    let y = (across - fc - sway) / len;
-    // body: a slim ellipse; tail fin: a small fan behind it
-    let e = pow((s - 0.04) / 0.5, 2.0) + pow(y / 0.12, 2.0);
-    let body = smoothstep(1.15, 0.85, e);
-    let fw = 0.13 * smoothstep(-0.44, -0.66, s) * step(-0.7, s);
-    let fin = smoothstep(fw + 0.02, fw - 0.01, abs(y)) * step(s, -0.42);
-    dark = max(dark, max(body, fin));
-  }
-  return dark;
 }
 @fragment fn fs(in: WOut) -> @location(0) vec4f {
   let t = u.camPos.w;
@@ -1142,14 +1108,7 @@ fn riverFish(along: f32, across: f32) -> f32 {
   let lt = terrainLight(in.wp.xz);
   let vis = min(lt.r, shadowMapVis(in.wp, vec3f(0.0, 1.0, 0.0)));
   // glacial water: milky grey-turquoise
-  var body = vec3f(0.11, 0.17, 0.17) * (ambient(vec3f(0.0, 1.0, 0.0)) + u.sunColor.rgb * u.sunDir.w * 0.35 * vis);
-  // trout under the surface: only in calm water, only close by, faint in
-  // the milky glacial water
-  let camD = distance(u.camPos.xyz, in.wp);
-  if (in.flow < 0.75 && camD < 90.0 && u.season.y < 0.5) {
-    let f = riverFish(in.uv.y, in.across) * (1.0 - smoothstep(0.45, 0.75, in.flow)) * (1.0 - smoothstep(50.0, 90.0, camD));
-    body = mix(body, body * 0.22 + vec3f(0.008, 0.01, 0.006), f * 0.9);
-  }
+  let body = vec3f(0.11, 0.17, 0.17) * (ambient(vec3f(0.0, 1.0, 0.0)) + u.sunColor.rgb * u.sunDir.w * 0.35 * vis);
   var c = mix(body, refl, fres * 0.85);
   // white water on steep reaches and at the banks
   let edge = 1.0 - abs(in.uv.x * 2.0 - 1.0);
@@ -1534,53 +1493,6 @@ struct POut { @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1
 }
 `;
 
-// ---- a trout leaping from the lake ------------------------------------------------
-// One instance per rise slot (u.rings); slots marked as leaps show a fish
-// arcing out of the water and back during the first 0.7 s.
-export const LEAP = COMMON + /* wgsl */ `
-struct FOut2 { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) n: vec3f, @location(2) belly: f32 };
-@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> FOut2 {
-  var o: FOut2;
-  o.pos = vec4f(0.0, 0.0, -2.0, 1.0);
-  let rg = u.rings[ii];
-  let age = u.camPos.w - rg.z;
-  let dur = 0.7;
-  if (rg.w < 0.5 || age < 0.0 || age > dur || u.season.y > 0.5) { return o; }
-  let s = age / dur;
-  let a = hash11(rg.z * 0.37) * 6.283;
-  let head = vec3f(cos(a), 0.0, sin(a));
-  let side = vec3f(-head.z, 0.0, head.x);
-  let len = 0.6;
-  // centre of the arc, and the body tilting from nose-up to nose-down
-  let c = vec3f(rg.x, u.extra2.w - 0.2, rg.y) + head * (s - 0.5) * 0.9 + vec3f(0.0, 1.0, 0.0) * 4.0 * 0.7 * s * (1.0 - s);
-  let pitch = (0.5 - s) * 2.2;
-  let fwd = normalize(head * cos(pitch) + vec3f(0.0, sin(pitch), 0.0));
-  let up = cross(fwd, side);
-  let bend = sin(age * 30.0) * 0.12;
-  // a side-on silhouette (body and tail) and the same shape lying flat
-  var shape = array<vec2f, 6>(vec2f(0.5, 0.0), vec2f(-0.1, 0.11), vec2f(-0.1, -0.09), vec2f(-0.1, 0.0), vec2f(-0.62, 0.12 + bend), vec2f(-0.62, -0.12 + bend));
-  let k = shape[vi % 6u];
-  let lying = vi >= 6u;
-  let off = select(up * k.y, side * k.y * 0.6, lying);
-  let wp = c + fwd * k.x * len + off * len;
-  o.pos = u.viewProj * vec4f(wp, 1.0);
-  o.wp = wp;
-  o.n = select(side, up, lying);
-  o.belly = k.y;
-  return o;
-}
-@fragment fn fs(in: FOut2, @builtin(front_facing) ff: bool) -> @location(0) vec4f {
-  let n = select(-in.n, in.n, ff);
-  let v = normalize(u.camPos.xyz - in.wp);
-  // olive back, silver flanks catching the light
-  let base = mix(vec3f(0.16, 0.17, 0.12), vec3f(0.55, 0.56, 0.52), smoothstep(0.08, -0.06, in.belly));
-  var c = base * (ambient(n) + u.sunColor.rgb * u.sunDir.w * max(dot(n, u.sunDir.xyz), 0.0) * 0.8);
-  let hv = normalize(v + u.sunDir.xyz);
-  c += u.sunColor.rgb * u.sunDir.w * pow(max(abs(dot(n, hv)), 0.0), 40.0) * 0.6;
-  return vec4f(applyFog(c, in.wp), 1.0);
-}
-`;
-
 // ---- avalanche: a powder cloud running down a track -------------------------------
 // The front runs from the start to the end of the track, speeding up. Puffs
 // of snow dust are thrown up as it passes each point along the way; they
@@ -1758,29 +1670,7 @@ struct LOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f };
   }
   let d = fbmD(in.wp.xz * 0.18 + vec2f(t * 0.06, t * 0.04), 3) + fbmD(in.wp.xz * 0.05 - vec2f(t * 0.02, 0.0), 2) * 0.5;
   let calm = 0.06 + 0.25 * u.weather.x;
-  var nxz = d.yz * calm;
-  // rings spreading where trout rise
-  var ringLight = 0.0;
-  for (var i = 0; i < 4; i++) {
-    let rg = u.rings[i];
-    let age = t - rg.z;
-    if (age < 0.0 || age > 8.0) { continue; }
-    let dv = in.wp.xz - rg.xy;
-    let dd = length(dv);
-    if (dd > 7.0) { continue; }
-    let fade = exp(-age * 0.45);
-    // three ripples, one after the other, wider as they spread
-    for (var k = 0; k < 3; k++) {
-      let r = 0.1 + (age - f32(k) * 0.4) * 0.75;
-      if (r <= 0.0) { continue; }
-      let wdt = 0.16 + 0.04 * r;
-      let x = (dd - r) / wdt;
-      let band = exp(-x * x) * fade * (1.0 - 0.3 * f32(k));
-      nxz += (dv / max(dd, 1e-3)) * cos(x * 2.0) * band * 1.1;
-      ringLight += band;
-    }
-  }
-  let n = normalize(vec3f(nxz.x, 1.0, nxz.y));
+  let n = normalize(vec3f(d.y * calm, 1.0, d.z * calm));
   let fres = 0.04 + 0.96 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
   var refl: vec3f;
   if (u.extra.w > 0.5) {
@@ -1792,54 +1682,8 @@ struct LOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f };
     refl = skyColor(normalize(vec3f(r.x, abs(r.y), r.z)), false);
   }
   let lt = terrainLight(in.wp.xz);
-  let lit0 = ambient(up) + u.sunColor.rgb * u.sunDir.w * 0.3 * lt.r;
-  var body = vec3f(0.015, 0.04, 0.05) * lit0;
-  // clear water: the gravel bottom shows in the shallows, fading into the
-  // deep; a ray into the water bends, so what lies below appears shifted
-  let level = u.extra2.w;
-  let camD = distance(u.camPos.xyz, in.wp);
-  let hd = normalize(-v.xz + vec2f(1e-5));
-  let tanR = length(v.xz) / max(v.y, 0.05) * 0.62;
-  let depth = max(level - heightAt(in.wp.xz - hd * tanR * 1.5), 0.0);
-  let gravel = mix(vec3f(0.36, 0.33, 0.26), vec3f(0.22, 0.22, 0.18), vnoise(in.wp.xz * 0.9));
-  let bottom = shade(gravel, up, lt.r, 1.0, 0.0);
-  let clr = exp(-depth * 0.32);
-  body = mix(body, bottom * vec3f(0.55, 0.8, 0.75), clr * 0.9);
-  // trout cruising along the shallows, their shadows on the bottom below
-  if (camD < 160.0) {
-    var fish = 0.0;
-    var shadow = 0.0;
-    let fishDepth = 0.7;
-    let p = in.wp.xz - hd * tanR * fishDepth;
-    let ps = in.wp.xz - hd * tanR * depth - u.sunDir.xz / max(u.sunDir.y, 0.2) * max(depth - fishDepth, 0.0);
-    for (var i = 0; i < 12; i++) {
-      let h = vec4f(hash11(f32(i) * 1.31 + 0.2), hash11(f32(i) * 2.17 + 0.5), hash11(f32(i) * 3.73 + 0.8), hash11(f32(i) * 5.11 + 0.1));
-      let dir = select(-1.0, 1.0, h.x > 0.5);
-      let ang = h.y * 6.283 + dir * t * (0.006 + 0.008 * h.z) + 0.15 * sin(t * 0.05 + h.w * 9.0);
-      let rad = u.extra2.z * (0.66 + 0.16 * h.w + 0.05 * sin(t * 0.07 + h.z * 7.0));
-      let c0 = u.extra2.xy + vec2f(cos(ang), sin(ang)) * rad;
-      let head = normalize(vec2f(-sin(ang), cos(ang)) * dir);
-      let len = 0.55 + 0.35 * h.z;
-      for (var k = 0; k < 2; k++) {
-        let q = select(p, ps, k == 1) - c0;
-        let s = dot(q, head) / len;
-        if (abs(s) > 0.75) { continue; }
-        let sway = sin(t * 5.0 + h.x * 40.0) * 0.06 * len * smoothstep(0.2, -0.6, s);
-        let y = (dot(q, vec2f(-head.y, head.x)) - sway) / len;
-        let e = pow((s - 0.04) / 0.5, 2.0) + pow(y / 0.12, 2.0);
-        let fw = 0.13 * smoothstep(-0.44, -0.66, s) * step(-0.7, s);
-        let m = max(smoothstep(1.15, 0.85, e), smoothstep(fw + 0.02, fw - 0.01, abs(y)) * step(s, -0.42));
-        if (k == 0) { fish = max(fish, m); } else { shadow = max(shadow, m); }
-      }
-    }
-    let nearF = 1.0 - smoothstep(90.0, 160.0, camD);
-    body = mix(body, body * 0.55, shadow * clr * nearF * 0.8);
-    body = mix(body, shade(vec3f(0.035, 0.04, 0.03), up, lt.r, 1.0, 0.0) * vec3f(0.6, 0.8, 0.75), fish * nearF * 0.92);
-  }
-  // looking down you see into the water; toward the horizon it turns to a mirror
-  var c = mix(body, refl, clamp(fres + 0.03, 0.0, 1.0));
-  // the ripples catch the sky
-  c = mix(c, refl * 1.15, clamp(ringLight, 0.0, 1.0) * 0.45);
+  let deep = vec3f(0.015, 0.04, 0.05) * (ambient(up) + u.sunColor.rgb * u.sunDir.w * 0.3 * lt.r);
+  var c = mix(deep, refl, clamp(fres + 0.35, 0.0, 1.0));
   let hv = normalize(v + u.sunDir.xyz);
   c += u.sunColor.rgb * u.sunDir.w * pow(max(dot(n, hv), 0.0), 200.0) * 2.5 * lt.r;
   return vec4f(applyFog(c, in.wp), 1.0);

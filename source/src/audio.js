@@ -250,34 +250,6 @@ export class Soundscape {
     if (level > 0.6) voice('highpass', 1600, 0.5, 0.12 * (level - 0.6));
   }
 
-  // A trout rising or splashing back on the lake: a small water drop with a
-  // touch of spray. Quiet, and only heard when near.
-  plip(delay, level, pan, splash = 0) {
-    if (!this.ctx || this.ctx.state !== 'running' || level <= 0.01) return;
-    const ctx = this.ctx, t0 = ctx.currentTime + delay;
-    const out = this.#pan(pan * 0.7);
-    out.connect(this.master); out.connect(this.reverb);
-    const o = ctx.createOscillator(); o.type = 'sine';
-    const f0 = 420 + Math.random() * 260;
-    o.frequency.setValueAtTime(f0, t0);
-    o.frequency.exponentialRampToValueAtTime(f0 * 2.2, t0 + 0.05);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0, t0);
-    g.gain.linearRampToValueAtTime(0.09 * level, t0 + 0.004);
-    g.gain.exponentialRampToValueAtTime(0.0003, t0 + 0.08);
-    o.connect(g).connect(out);
-    o.start(t0); o.stop(t0 + 0.1);
-    const src = ctx.createBufferSource(); src.buffer = this.noise;
-    const hp = ctx.createBiquadFilter(); hp.type = 'bandpass'; hp.frequency.value = 2400 + Math.random() * 1200; hp.Q.value = 0.8;
-    const gn = ctx.createGain();
-    const len = 0.08 + splash * 0.25;
-    gn.gain.setValueAtTime(0, t0);
-    gn.gain.linearRampToValueAtTime((0.05 + 0.12 * splash) * level, t0 + 0.006);
-    gn.gain.exponentialRampToValueAtTime(0.0003, t0 + len);
-    src.connect(hp).connect(gn).connect(out);
-    src.start(t0, Math.random() * 4); src.stop(t0 + len + 0.02);
-  }
-
   // Campfire: short dry crackles.
   #crackle(level) {
     const ctx = this.ctx, t0 = ctx.currentTime;

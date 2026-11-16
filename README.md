@@ -17,8 +17,7 @@ Download `index.html` and open it in a browser with WebGPU: a recent Chrome or E
 - A village mosque in Erzi: a stone hall under a hipped roof and an octagonal minaret with a crescent, its qibla wall turned toward Mecca
 - An old **stone arch bridge**, **watermills** on the streams, and a shepherd's **sheepfold** with a hut and a campfire on a high meadow
 - A **waterfall** cascading down the gorge wall, with spray where it lands
-- A **mountain lake** in a high basin that mirrors the peaks, sky and shores (on Medium and High), and freezes in winter. Its water is clear: looking down you see the gravel shallows and **trout** cruising along them, their shadows on the bottom. Now and then a trout rises, sending rings across the surface, most often at dawn and dusk; some leap clear and splash back with a soft plip
-- Trout holding in the calmer reaches of the river, noses into the current, faint in the milky glacial water
+- A **mountain lake** in a high basin that mirrors the peaks, sky and shores (on Medium and High), and freezes in winter
 - A **glacier** in a high cirque in the south, with crevasses and dark moraine edges, and its meltwater stream
 - Warm firelight in the windows of Erzi after dark
 - Dry-stone walls, terraced fields, footpaths and the road along the river
@@ -82,7 +81,7 @@ Low, Medium and High change render resolution, shadows, shader detail, grass, tr
 
 **Auto** (the default) adapts in both directions while you fly. Phones and tablets start on Low, desktops on Medium or High. If the frame rate stays low, the scene lowers its resolution, then drops a level. If it runs smoothly at 60 fps for a few seconds, it tries the next level up and keeps it only if it still holds about 60 fps. A level that proved too heavy isn't retried in that session. Picking Low, Medium or High in the menu pins that level instead.
 
-URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|morning|noon|golden|evening|night|cycle` (with `&hour=` for the cycle), `?season=spring|summer|autumn|winter`, `?weather=clear|changing|rain`, `?animals=few|normal|many|lots` set the time of day, `?q=low|medium|high` pin a detail level, `?stats` show stats, `?auto` skip the title screen, `?cam=x,y,z,yawDeg,pitchDeg` place the camera, `?avalanche` set off an avalanche right away, `?rise` (or `?rise=leap`) make trout rise often on the lake, where you look.
+URL parameters, mainly for testing: `?v=3` start at a viewpoint, `?t=dawn|morning|noon|golden|evening|night|cycle` (with `&hour=` for the cycle), `?season=spring|summer|autumn|winter`, `?weather=clear|changing|rain`, `?animals=few|normal|many|lots` set the time of day, `?q=low|medium|high` pin a detail level, `?stats` show stats, `?auto` skip the title screen, `?cam=x,y,z,yawDeg,pitchDeg` place the camera, `?avalanche` set off an avalanche right away.
 
 ## How it works
 
