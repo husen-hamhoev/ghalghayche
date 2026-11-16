@@ -12,6 +12,7 @@ export const TIMES = [
   { id: 'noon', label: 'Midday', hour: 12.8, mist: 0.0, fog: 0.85, clouds: 0.46 },
   { id: 'golden', label: 'Golden hour', hour: 17.6, mist: 0.0002, fog: 1.0, clouds: 0.4 },
   { id: 'evening', label: 'Evening', night: true, mist: 0.0012, fog: 0.9, clouds: 0.26 },
+  { id: 'night', label: 'Night', night: true, deep: true, mist: 0.001, fog: 0.8, clouds: 0.2 },
   { id: 'cycle', label: 'Day & night', cycle: true },
 ];
 
@@ -32,6 +33,7 @@ const COMMON = {
 
 export function environment(preset, hour) {
   if (preset.cycle) return cycle(hour ?? 18.6);
+  if (preset.deep) return deepNight(preset);
   if (preset.night) return evening(preset);
   const s = clamp((preset.hour - 6.0) / 13.0, 0, 1);
   const elevDeg = 2.2 + 56 * Math.sin(Math.PI * s);
@@ -107,6 +109,27 @@ export function cycle(hour) {
   env.moonDir = moonDir;
   env.moon = smoothstep(-1, 5, moonEl) * (1 - 0.75 * w);
   return { ...COMMON, ...env, hour: h };
+}
+
+// Deep night: no afterglow left, a dark sky full of stars with the Milky Way
+// arching up from the south-south-west, and the moon high in the east-north-
+// east, well away from the Milky Way's bright core so it does not wash it out.
+function deepNight(preset) {
+  const moonDir = dirFrom(68, 38);
+  return {
+    ...evening(preset),
+    sunDir: moonDir,
+    sunColor: [0.6, 0.7, 1.0],
+    sunIntensity: 0.7,
+    ambient: 2.6,
+    zenith: [0.006, 0.014, 0.044],
+    horizon: [0.026, 0.034, 0.066],
+    exposure: 2.6,
+    skySun: dirFrom(0, -30),
+    glowStrength: 0,
+    moonDir,
+    moon: 0.85,
+  };
 }
 
 // Blue hour: the sun just gone behind the western ridges, a warm afterglow,
