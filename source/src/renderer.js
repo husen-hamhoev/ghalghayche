@@ -7,7 +7,7 @@ import { pineMesh, broadleafMesh, rockMesh, cragMesh, sheepMesh, eagleMesh, hors
 
 const HDR = 'rgba16float';
 const DEPTH = 'depth32float';
-const UBO_SIZE = 464;
+const UBO_SIZE = 528;
 
 // WGSL template literals carry lots of indentation; trim it at load.
 const wgsl = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ');
@@ -23,6 +23,7 @@ const halton = (i, b) => {
 
 export class Renderer {
   constructor(device, context, format) {
+    this.rings = [[0, 0, -100, 0], [0, 0, -100, 0], [0, 0, -100, 0], [0, 0, -100, 0]]; // fish rising on the lake
     this.device = device;
     this.ctx = context;
     this.format = format;
@@ -172,7 +173,7 @@ export class Renderer {
       this.lake = {
         vb: this.#buffer(new Float32Array(verts), GPUBufferUsage.VERTEX),
         ib: this.#buffer(new Uint32Array(idx), GPUBufferUsage.INDEX),
-        count: idx.length, x: L.x, z: L.z, y,
+        count: idx.length, x: L.x, z: L.z, y, R: L.R,
       };
     }
     this.dummyColor = this.device.createTexture({ size: [1, 1], format: HDR, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
@@ -268,10 +269,11 @@ export class Renderer {
       wolves: make(S.OBJECTS, { buffers: objVB, vs: 'vs_wolf', cull: 'back' }),
       bats: make(S.BIRDS, { buffers: objVB, vs: 'vs_bat' }),
       grass: make(S.GRASS, {}),
-      water: make(S.WATER, { buffers: [{ arrayStride: 24, attributes: [
+      water: make(S.WATER, { buffers: [{ arrayStride: 28, attributes: [
         { shaderLocation: 0, offset: 0, format: 'float32x3' },
         { shaderLocation: 1, offset: 12, format: 'float32x2' },
         { shaderLocation: 2, offset: 20, format: 'float32' },
+        { shaderLocation: 3, offset: 24, format: 'float32' },
       ] }] }),
       sky: make(S.SKY, { depth: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'equal' } }),
     };
@@ -312,6 +314,15 @@ export class Renderer {
       fragment: { module: am, entryPoint: 'fs', targets: [{ format: HDR, blend: alphaBlend }] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: { format: DEPTH, depthWriteEnabled: false, depthCompare: 'greater' },
+      multisample: { count: msaa },
+    });
+    const lm2 = mod(S.LEAP);
+    this.leapPipe = d.createRenderPipeline({
+      layout: this.pipeLayout,
+      vertex: { module: lm2, entryPoint: 'vs' },
+      fragment: { module: lm2, entryPoint: 'fs', targets: [{ format: HDR }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: DEPTH, depthWriteEnabled: true, depthCompare: 'greater' },
       multisample: { count: msaa },
     });
     const bugs = mod(S.BUGS);
@@ -520,9 +531,10 @@ export class Renderer {
     u.set(env.season ?? [0, 0, 0, 0], 92);
     u.set(env.weather ?? [0, 0, 0, 0], 96);
     u.set([0, 0, env.lightningAz ?? 0, 0], 100);
-    u.set([0, 0, 0, 0], 104);
+    u.set(this.lake ? [this.lake.x, this.lake.z, this.lake.R, this.lake.y + 0.25] : [0, 0, 1, -1e4], 104);
     const av = this.aval;
     u.set(av ? [av.sx, av.sz, av.ex, av.ez, av.t, av.run, 1, av.seed] : [0, 0, 0, 0, 0, 0, 0, 0], 108);
+    for (let i = 0; i < 4; i++) u.set(this.rings[i], 116 + i * 4);
 
     // is the lake near and in view? then render its reflection this frame
     let reflect = false, reflVP = null;
@@ -709,6 +721,8 @@ export class Renderer {
         pass.setVertexBuffer(0, this.fx.buf);
         pass.draw(6, this.fx.count);
       }
+      // a trout leaping from the lake
+      if (this.lake && this.rings.some((r) => r[3] > 0.5)) { pass.setPipeline(this.leapPipe); pass.draw(12, 4); }
       // an avalanche's powder cloud
       if (this.aval) { pass.setPipeline(this.avalPipe); pass.draw(6, 140); }
       // fireflies after dark

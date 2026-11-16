@@ -584,6 +584,38 @@ async function main() {
     av.next = 60 + Math.random() * 80;
   };
 
+  // Trout rising on the lake: rings now and then, most often around dawn and
+  // dusk; some leap clear and splash back, with a soft plip when near.
+  // (?rise makes them frequent, for testing.)
+  const rise = { next: 3, slot: 0 };
+  const updateRises = (dt, time) => {
+    const L = plan.lake;
+    if (!L || settings.season === 'winter') return;
+    rise.next -= dt;
+    if (rise.next > 0) return;
+    const sy = env.skySun[1];
+    const dusk = smoothstep(-0.2, -0.02, sy) * (1 - smoothstep(0.2, 0.45, sy));
+    rise.next = params.has('rise') ? 0.8 + Math.random() : (3 + Math.random() * 9) / (0.4 + 1.6 * dusk);
+    const a = Math.random() * Math.PI * 2, r = L.shore(a) * (0.2 + 0.62 * Math.sqrt(Math.random()));
+    let x = L.x + Math.cos(a) * r, z = L.z + Math.sin(a) * r;
+    // for testing: rise where the camera looks
+    if (params.has('rise') && cam.fwd[1] < -0.05) {
+      const k = (L.level - cam.pos[1]) / cam.fwd[1];
+      const hx = cam.pos[0] + cam.fwd[0] * k + (Math.random() - 0.5) * 12, hz = cam.pos[2] + cam.fwd[2] * k + (Math.random() - 0.5) * 12;
+      const ha = Math.atan2(hz - L.z, hx - L.x);
+      if (Math.hypot(hx - L.x, hz - L.z) < L.shore(ha) * 0.85) { x = hx; z = hz; }
+    }
+    const leap = params.get('rise') === 'leap' || Math.random() < (params.has('rise') ? 0.6 : 0.3) ? 1 : 0;
+    renderer.rings[rise.slot] = [x, z, time, leap];
+    rise.slot = (rise.slot + 1) % 4;
+    const dx = x - cam.pos[0], dz = z - cam.pos[2], d = Math.hypot(dx, dz, L.level - cam.pos[1]);
+    if (d < 180) {
+      const level = (1 - d / 180) ** 2, pan = (dx * cam.right[0] + dz * cam.right[2]) / (Math.hypot(dx, dz) || 1);
+      audio.plip(d / 343, level * (leap ? 1 : 0.6), pan, leap ? 0.2 : 0);
+      if (leap) audio.plip(d / 343 + 0.7, level, pan, 1);
+    }
+  };
+
   const t0 = performance.now();
 
   function frame(now) {
@@ -622,6 +654,7 @@ async function main() {
     }
     env.fade = fade;
     updateAvalanche(dt);
+    updateRises(dt, time);
     const flash = updateWeather(dt, env.skySun[1] > 0);
     const renderEnv = withWeather(env, flash);
     renderer.render(cam, renderEnv, time);
